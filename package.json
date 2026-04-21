@@ -19,4 +19,4 @@
     "web": "npm run dev --prefix web",
     "web:build": "npm run build --prefix web"
   }
-}
+} 
