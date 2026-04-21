@@ -10,6 +10,10 @@ The form posts to your deployed API. In the GitHub repo, set the Actions **repos
 
 If the site 404s, enable **Settings → Pages → Build and deployment → Source: GitHub Actions** and confirm the latest **Deploy intake website** run in **Actions** succeeded.
 
+## Deploy API + database (Render + Neon)
+
+Step-by-step for the whole team (accounts, Neon schema, Render web service, `API_BASE_URL`): **[docs/SETUP-RENDER-NEON.md](docs/SETUP-RENDER-NEON.md)**.
+
 ## Repo layout
 
 | Folder   | What it is |
