@@ -1,0 +1,8 @@
+# CallWizard — optional Python dependencies
+#
+# The runnable app (API, mobile, web) uses Node.js. Install JS deps with:
+#   npm run install:all
+#
+# Add pinned packages below when you introduce Python (e.g. scripts, notebooks,
+# or a data/ML pipeline). Example:
+#   requests==2.32.3
