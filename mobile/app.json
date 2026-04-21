@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "CallWizard",
+    "slug": "callwizard",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "callwizard",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.callwizard.app"
+    },
+    "android": {
+      "package": "com.callwizard.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#1a1a2e"
+      }
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "sounds": []
+        }
+      ]
+    ],
+    "extra": {
+      "apiBaseUrl": "http://localhost:3001"
+    }
+  }
+}

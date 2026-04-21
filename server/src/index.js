@@ -1,0 +1,138 @@
+import "dotenv/config";
+import cors from "cors";
+import express from "express";
+import { pool } from "./db.js";
+import { sendNudge } from "./push.js";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PORT = Number(process.env.PORT) || 3001;
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.post("/users", async (req, res) => {
+  const { displayName, phoneE164 } = req.body ?? {};
+  if (!displayName || !phoneE164) {
+    return res.status(400).json({ error: "displayName and phoneE164 required" });
+  }
+  try {
+    const r = await pool.query(
+      `INSERT INTO users (display_name, phone_e164) VALUES ($1, $2)
+       ON CONFLICT (phone_e164) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id, display_name, phone_e164`,
+      [displayName, phoneE164]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.post("/users/:userId/device-token", async (req, res) => {
+  const { userId } = req.params;
+  const { expoPushToken, fcmToken } = req.body ?? {};
+  if (!expoPushToken && !fcmToken) {
+    return res.status(400).json({ error: "expoPushToken or fcmToken required" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO device_tokens (user_id, expo_push_token, fcm_token, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (user_id) DO UPDATE SET
+         expo_push_token = COALESCE(EXCLUDED.expo_push_token, device_tokens.expo_push_token),
+         fcm_token = COALESCE(EXCLUDED.fcm_token, device_tokens.fcm_token),
+         updated_at = now()`,
+      [userId, expoPushToken ?? null, fcmToken ?? null]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.post("/users/:userId/contacts", async (req, res) => {
+  const { userId } = req.params;
+  const { name, phoneE164, frequencyDays } = req.body ?? {};
+  if (!name || !phoneE164) {
+    return res.status(400).json({ error: "name and phoneE164 required" });
+  }
+  try {
+    const r = await pool.query(
+      `INSERT INTO contacts (owner_user_id, name, phone_e164, frequency_days)
+       VALUES ($1, $2, $3, $4) RETURNING id, name, phone_e164, frequency_days`,
+      [userId, name, phoneE164, frequencyDays ?? 7]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.get("/users/:userId/contacts", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const r = await pool.query(
+      `SELECT id, name, phone_e164, frequency_days, last_nudged_at FROM contacts
+       WHERE owner_user_id = $1 ORDER BY created_at DESC`,
+      [userId]
+    );
+    res.json(r.rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+/** Manual test: nudge a user to call a specific contact (by contact id). */
+app.post("/users/:userId/nudge", async (req, res) => {
+  const { userId } = req.params;
+  const { contactId } = req.body ?? {};
+  if (!contactId) {
+    return res.status(400).json({ error: "contactId required" });
+  }
+  try {
+    const contact = await pool.query(
+      `SELECT id, name, phone_e164 FROM contacts WHERE id = $1 AND owner_user_id = $2`,
+      [contactId, userId]
+    );
+    if (!contact.rows[0]) {
+      return res.status(404).json({ error: "contact_not_found" });
+    }
+    const device = await pool.query(
+      `SELECT expo_push_token, fcm_token FROM device_tokens WHERE user_id = $1`,
+      [userId]
+    );
+    const row = device.rows[0];
+    if (!row?.expo_push_token && !row?.fcm_token) {
+      return res.status(400).json({ error: "no_device_token" });
+    }
+    const c = contact.rows[0];
+    const result = await sendNudge(
+      { expoPushToken: row.expo_push_token, fcmToken: row.fcm_token },
+      {
+        title: "Time for a call?",
+        body: `Tap to call ${c.name}`,
+        data: {
+          contactPhone: c.phone_e164,
+          contactId: String(c.id),
+        },
+      }
+    );
+    await pool.query(`UPDATE contacts SET last_nudged_at = now() WHERE id = $1`, [c.id]);
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "send_failed", message: e.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`CallWizard API http://localhost:${PORT}`);
+});

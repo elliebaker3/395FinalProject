@@ -1,0 +1,22 @@
+{
+  "name": "callwizard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CallWizard monorepo (Expo mobile + Express API)",
+  "engines": {
+    "node": ">=20.19.0 <23",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix mobile && npm install --prefix web",
+    "server": "npm run dev --prefix server",
+    "server:start": "npm run start --prefix server",
+    "mobile": "npm start --prefix mobile",
+    "mobile:ios": "npm run ios --prefix mobile",
+    "mobile:android": "npm run android --prefix mobile",
+    "db:init": "npm run db:init --prefix server",
+    "scheduler": "npm run scheduler --prefix server",
+    "web": "npm run dev --prefix web",
+    "web:build": "npm run build --prefix web"
+  }
+}

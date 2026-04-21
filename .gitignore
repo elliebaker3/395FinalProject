@@ -1,0 +1,9 @@
+node_modules/
+web/dist/
+.env
+.expo/
+dist/
+*.log
+.DS_Store
+server/.env
+mobile/.env
