@@ -11,6 +11,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "db:init": "node src/scripts/init-db.js",
+    "db:migrate": "node src/scripts/migrate-add-availability.js",
     "scheduler": "node src/scripts/run-scheduler-once.js"
   },
   "dependencies": {

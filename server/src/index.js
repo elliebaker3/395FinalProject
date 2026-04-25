@@ -90,6 +90,61 @@ app.get("/users/:userId/contacts", async (req, res) => {
   }
 });
 
+app.get("/users/:userId/preferences", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const userRow = await pool.query(
+      `SELECT timezone FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (!userRow.rows[0]) return res.status(404).json({ error: "user_not_found" });
+
+    const avail = await pool.query(
+      `SELECT day_of_week,
+              to_char(start_time, 'HH24:MI') AS start_time,
+              to_char(end_time,   'HH24:MI') AS end_time
+       FROM user_availability WHERE user_id = $1
+       ORDER BY day_of_week, start_time`,
+      [userId]
+    );
+    res.json({ timezone: userRow.rows[0].timezone, availability: avail.rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.put("/users/:userId/preferences", async (req, res) => {
+  const { userId } = req.params;
+  const { timezone, availability } = req.body ?? {};
+  if (!timezone) return res.status(400).json({ error: "timezone required" });
+  if (!Array.isArray(availability)) return res.status(400).json({ error: "availability must be an array" });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`UPDATE users SET timezone = $1 WHERE id = $2`, [timezone, userId]);
+    await client.query(`DELETE FROM user_availability WHERE user_id = $1`, [userId]);
+    for (const w of availability) {
+      const { day_of_week, start_time, end_time } = w;
+      if (day_of_week == null || !start_time || !end_time) continue;
+      await client.query(
+        `INSERT INTO user_availability (user_id, day_of_week, start_time, end_time)
+         VALUES ($1, $2, $3, $4)`,
+        [userId, day_of_week, start_time, end_time]
+      );
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  } finally {
+    client.release();
+  }
+});
+
 /** Manual test: nudge a user to call a specific contact (by contact id). */
 app.post("/users/:userId/nudge", async (req, res) => {
   const { userId } = req.params;

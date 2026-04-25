@@ -3,14 +3,38 @@ import { pool } from "../db.js";
 import { sendNudge } from "../push.js";
 
 /**
- * Minimal "cron" pass: one contact per user where last_nudged is null or older than frequency.
- * Production: run on a schedule (GitHub Action, Render cron, etc.) or use node-cron in-process.
+ * Cron pass: for each user, send one nudge for their most-overdue contact —
+ * but only if the current time falls within one of their availability windows.
+ * Users with no availability windows set are always eligible.
  */
 async function main() {
-  const users = await pool.query(`SELECT id FROM users`);
+  const users = await pool.query(`SELECT id, timezone FROM users`);
+
   for (const u of users.rows) {
+    // If the user has any availability windows, check whether now falls in one.
+    const availCheck = await pool.query(
+      `SELECT EXISTS(
+         SELECT 1 FROM user_availability
+         WHERE user_id = $1
+       ) AS has_windows,
+       EXISTS(
+         SELECT 1 FROM user_availability
+         WHERE user_id = $1
+           AND day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE $2)::int
+           AND start_time <= (now() AT TIME ZONE $2)::time
+           AND end_time   >  (now() AT TIME ZONE $2)::time
+       ) AS in_window`,
+      [u.id, u.timezone]
+    );
+
+    const { has_windows, in_window } = availCheck.rows[0];
+    if (has_windows && !in_window) {
+      console.log(`skipping user ${u.id} — outside availability window`);
+      continue;
+    }
+
     const due = await pool.query(
-      `SELECT c.id, c.name, c.phone_e164, c.frequency_days, c.last_nudged_at
+      `SELECT c.id, c.name, c.phone_e164
        FROM contacts c
        WHERE c.owner_user_id = $1
          AND (
@@ -36,12 +60,10 @@ async function main() {
       {
         title: "CallWizard",
         body: `Tap to call ${contact.name}`,
-        data: {
-          contactPhone: contact.phone_e164,
-          contactId: String(contact.id),
-        },
+        data: { contactPhone: contact.phone_e164, contactId: String(contact.id) },
       }
     );
+
     if (result.ok) {
       await pool.query(`UPDATE contacts SET last_nudged_at = now() WHERE id = $1`, [
         contact.id,
@@ -51,6 +73,7 @@ async function main() {
       console.warn(`failed user ${u.id}:`, result.errors);
     }
   }
+
   await pool.end();
 }
 
