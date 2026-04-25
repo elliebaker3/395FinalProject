@@ -25,7 +25,7 @@
       ]
     ],
     "extra": {
-      "apiBaseUrl": "http://localhost:3001"
+      "apiBaseUrl": "https://callwizard-api.onrender.com"
     }
   }
 }
