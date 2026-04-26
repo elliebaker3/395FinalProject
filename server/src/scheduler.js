@@ -46,11 +46,22 @@ export async function passFrequencyNudges() {
     const due = await pool.query(
       `SELECT c.id, c.name, c.phone_e164
        FROM contacts c
+              LEFT JOIN users cu ON cu.phone_e164 = c.phone_e164
        WHERE c.owner_user_id = $1
          AND (
            c.last_notified_at IS NULL
            OR c.last_notified_at <= now() - COALESCE(c.frequency_days, 7) * interval '1 day'
          )
+                  AND (
+                             cu.id IS NULL
+                                        OR EXISTS (
+                                                     SELECT 1 FROM user_availability
+                                                                  WHERE user_id = cu.id
+                                                                                 AND day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE cu.timezone)::int
+                                                                                                AND start_time <= (now() AT TIME ZONE cu.timezone)::time
+                                                                                                               AND end_time   >  (now() AT TIME ZONE cu.timezone)::time
+                                                                                                                          )
+                                                                                                                                   )
        ORDER BY c.last_notified_at NULLS FIRST
        LIMIT 1`,
       [u.id]
