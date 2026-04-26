@@ -139,59 +139,21 @@ export default function App() {
     setScreen("setup");
   }
 
-  async function syncPhoneContacts(userId: string): Promise<number> {
-    const { status } = await Contacts.requestPermissionsAsync();
-    if (status !== "granted") {
-      Alert.alert("Permission denied", "Enable contacts access in your phone Settings to sync.");
-      return 0;
-    }
-    const { data } = await Contacts.getContactsAsync({
-      fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
-    });
-    const toSync = data
-      .filter((c) => c.name && c.phoneNumbers?.length)
-      .map((c) => ({
-        name: c.name!,
-        phoneE164: normalizePhone(c.phoneNumbers![0].number ?? ""),
-      }))
-      .filter((c) => c.phoneE164.length >= 8);
+  const [contactSelectVisible, setContactSelectVisible] = useState(false);
+  const [contactSelectCallback, setContactSelectCallback] = useState<(() => void) | null>(null);
 
-    if (toSync.length === 0) return 0;
-
-    const res = await fetchWithTimeout(
-      `${getApiBase()}/users/${userId}/contacts/bulk`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contacts: toSync }),
-      }
-    );
-    if (!res.ok) throw new Error(`Server error: ${res.status}`);
-    const result = await res.json();
-    return result.added as number;
+  function showContactSelect(onComplete: () => void) {
+    setContactSelectCallback(() => onComplete);
+    setContactSelectVisible(true);
   }
 
-  function promptContactSync(userId: string, onComplete: () => void) {
-    Alert.alert(
-      "Sync Contacts",
-      "Would you like to import your phone contacts into CallWizard?",
-      [
-        {
-          text: "Yes, sync contacts",
-          onPress: async () => {
-            try {
-              const added = await syncPhoneContacts(userId);
-              Alert.alert("Contacts synced", `${added} new contact${added !== 1 ? "s" : ""} added.`);
-            } catch {
-              Alert.alert("Sync failed", "Could not sync contacts. You can try again in Settings.");
-            } finally {
-              onComplete();
-            }
-          },
-        },
-        { text: "Not now", style: "cancel", onPress: onComplete },
-      ]
-    );
+  function hideContactSelect(added: number) {
+    setContactSelectVisible(false);
+    if (added > 0) {
+      Alert.alert("Contacts synced", `${added} new contact${added !== 1 ? "s" : ""} added.`);
+    }
+    contactSelectCallback?.();
+    setContactSelectCallback(null);
   }
 
   async function handleLogout() {
@@ -222,7 +184,7 @@ export default function App() {
     return (
       <AvailabilitySetupScreen
         user={user}
-        onDone={() => promptContactSync(user.id, () => setScreen("app"))}
+        onDone={() => showContactSelect(() => setScreen("app"))}
       />
     );
   }
@@ -236,18 +198,197 @@ export default function App() {
         <SettingsScreen
           user={user}
           onLogout={handleLogout}
-          onSyncContacts={() =>
-            syncPhoneContacts(user.id)
-              .then((added) =>
-                Alert.alert("Contacts synced", `${added} new contact${added !== 1 ? "s" : ""} added.`)
-              )
-              .catch(() =>
-                Alert.alert("Sync failed", "Could not sync contacts. Please try again.")
-              )
-          }
+          onSyncContacts={() => showContactSelect(() => {})}
         />
       )}
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+      {contactSelectVisible && user && (
+        <ContactSelectScreen
+          userId={user.id}
+          onDone={hideContactSelect}
+          onCancel={() => {
+            setContactSelectVisible(false);
+            contactSelectCallback?.();
+            setContactSelectCallback(null);
+          }}
+        />
+      )}
+    </View>
+  );
+}
+
+// ── Contact Select Screen (overlay) ───────────────────────────────────────
+
+interface PhoneContact {
+  name: string;
+  phoneE164: string;
+}
+
+function ContactSelectScreen({
+  userId,
+  onDone,
+  onCancel,
+}: {
+  userId: string;
+  onDone: (added: number) => void;
+  onCancel: () => void;
+}) {
+  const [allContacts, setAllContacts] = useState<PhoneContact[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [permDenied, setPermDenied] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status !== "granted") { setPermDenied(true); setLoading(false); return; }
+      const { data } = await Contacts.getContactsAsync({
+        fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+      });
+      const normalized: PhoneContact[] = data
+        .filter((c) => c.name && c.phoneNumbers?.length)
+        .map((c) => ({
+          name: c.name!,
+          phoneE164: normalizePhone(c.phoneNumbers![0].number ?? ""),
+        }))
+        .filter((c) => c.phoneE164.length >= 8)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setAllContacts(normalized);
+      setLoading(false);
+    })();
+  }, []);
+
+  const filtered = allContacts.filter((c) =>
+    c.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  function toggle(phoneE164: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(phoneE164) ? next.delete(phoneE164) : next.add(phoneE164);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelected(new Set(allContacts.map((c) => c.phoneE164)));
+  }
+
+  function deselectAll() {
+    setSelected(new Set());
+  }
+
+  async function syncSelected() {
+    if (selected.size === 0) { Alert.alert("Select at least one contact."); return; }
+    setSyncing(true);
+    try {
+      const toSync = allContacts.filter((c) => selected.has(c.phoneE164));
+      const res = await fetchWithTimeout(
+        `${getApiBase()}/users/${userId}/contacts/bulk`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contacts: toSync }),
+        }
+      );
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const result = await res.json();
+      onDone(result.added as number);
+    } catch {
+      Alert.alert("Sync failed", "Could not sync contacts. Please try again.");
+      setSyncing(false);
+    }
+  }
+
+  return (
+    <View style={styles.overlay}>
+      <StatusBar style="dark" />
+      <View style={styles.overlayHeader}>
+        <Text style={styles.overlayTitle}>Select Contacts to Sync</Text>
+        <Pressable onPress={onCancel}>
+          <Text style={styles.overlayClose}>✕</Text>
+        </Pressable>
+      </View>
+
+      {loading ? (
+        <ActivityIndicator color={PURPLE} style={{ marginTop: 40 }} />
+      ) : permDenied ? (
+        <View style={styles.overlayBody}>
+          <Text style={styles.emptyText}>
+            Contacts permission denied. Enable it in your phone Settings.
+          </Text>
+          <Pressable style={[styles.primaryBtn, { marginTop: 24 }]} onPress={onCancel}>
+            <Text style={styles.primaryBtnText}>Close</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <>
+          <View style={styles.overlayBody}>
+            <TextInput
+              style={styles.contactSearch}
+              value={search}
+              onChangeText={setSearch}
+              placeholder="Search by name…"
+              autoCapitalize="none"
+              clearButtonMode="while-editing"
+            />
+            <View style={styles.selectAllRow}>
+              <Text style={styles.selectedCount}>
+                {selected.size} of {allContacts.length} selected
+              </Text>
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <Pressable onPress={selectAll}>
+                  <Text style={styles.selectAllBtn}>All</Text>
+                </Pressable>
+                <Pressable onPress={deselectAll}>
+                  <Text style={styles.selectAllBtn}>None</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+
+          <ScrollView style={styles.overlayList}>
+            {filtered.map((c) => {
+              const checked = selected.has(c.phoneE164);
+              return (
+                <Pressable
+                  key={c.phoneE164}
+                  style={styles.selectRow}
+                  onPress={() => toggle(c.phoneE164)}
+                >
+                  <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
+                    {checked && <Text style={styles.checkmark}>✓</Text>}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.contactListName}>{c.name}</Text>
+                    <Text style={styles.contactListPhone}>{c.phoneE164}</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+            {filtered.length === 0 && (
+              <Text style={[styles.emptyText, { padding: 20 }]}>No contacts found</Text>
+            )}
+          </ScrollView>
+
+          <View style={styles.overlayFooter}>
+            <Pressable
+              style={[styles.primaryBtn, { flex: 1, marginRight: 8 }, syncing && styles.btnDisabled]}
+              onPress={syncSelected}
+              disabled={syncing}
+            >
+              <Text style={styles.primaryBtnText}>
+                {syncing ? "Syncing…" : `Sync ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
+              </Text>
+            </Pressable>
+            <Pressable style={[styles.outlineBtn, { flex: 1 }]} onPress={onCancel}>
+              <Text style={styles.outlineBtnText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </>
+      )}
     </View>
   );
 }
@@ -525,6 +666,10 @@ function ScheduleScreen({ user }: { user: User }) {
   const [saving, setSaving] = useState(false);
   const [showContactList, setShowContactList] = useState(false);
   const [contactSearch, setContactSearch] = useState("");
+  const [showManualAdd, setShowManualAdd] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualPhone, setManualPhone] = useState("");
+  const [addingManual, setAddingManual] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -584,6 +729,35 @@ function ScheduleScreen({ user }: { user: User }) {
       setSchedules((prev) => prev.filter((s) => s.id !== id));
     } catch {
       Alert.alert("Error", "Could not delete schedule.");
+    }
+  }
+
+  async function addManualContact() {
+    if (!manualName.trim()) { Alert.alert("Enter a name."); return; }
+    if (!manualPhone.trim()) { Alert.alert("Enter a phone number."); return; }
+    setAddingManual(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/contacts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: manualName.trim(),
+          phoneE164: normalizePhone(manualPhone.trim()),
+          frequencyDays: 7,
+        }),
+      });
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const newContact = await res.json();
+      setContacts((prev) => [...prev, { ...newContact, last_nudged_at: null }]);
+      setSelContactId(newContact.id);
+      setShowContactList(false);
+      setShowManualAdd(false);
+      setManualName("");
+      setManualPhone("");
+    } catch (e: unknown) {
+      Alert.alert("Error", e instanceof Error ? e.message : "Could not add contact.");
+    } finally {
+      setAddingManual(false);
     }
   }
 
@@ -663,8 +837,42 @@ function ScheduleScreen({ user }: { user: User }) {
                     <Text style={styles.contactListPhone}>{c.phone_e164}</Text>
                   </Pressable>
                 ))}
-              {contacts.length === 0 && (
-                <Text style={[styles.emptyText, { padding: 14 }]}>No contacts added yet</Text>
+              {/* Manual add toggle */}
+              <Pressable
+                style={styles.manualAddToggle}
+                onPress={() => setShowManualAdd((v) => !v)}
+              >
+                <Text style={styles.manualAddToggleText}>
+                  {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
+                </Text>
+              </Pressable>
+              {showManualAdd && (
+                <View style={styles.manualAddForm}>
+                  <TextInput
+                    style={styles.input}
+                    value={manualName}
+                    onChangeText={setManualName}
+                    placeholder="Name"
+                    autoCapitalize="words"
+                  />
+                  <TextInput
+                    style={[styles.input, { marginTop: 8 }]}
+                    value={manualPhone}
+                    onChangeText={setManualPhone}
+                    placeholder="+1 555 000 0000"
+                    keyboardType="phone-pad"
+                    autoCapitalize="none"
+                  />
+                  <Pressable
+                    style={[styles.primaryBtn, { marginTop: 10 }, addingManual && styles.btnDisabled]}
+                    onPress={addManualContact}
+                    disabled={addingManual}
+                  >
+                    <Text style={styles.primaryBtnText}>
+                      {addingManual ? "Adding…" : "Add Contact"}
+                    </Text>
+                  </Pressable>
+                </View>
               )}
             </View>
           )}
@@ -1292,4 +1500,73 @@ const styles = StyleSheet.create({
   tabIcon: { fontSize: 10, color: "#ccc", marginBottom: 2 },
   tabLabel: { fontSize: 12, color: "#aaa" },
   tabLabelActive: { color: PURPLE, fontWeight: "600" },
+
+  // Contact select overlay
+  overlay: {
+    position: "absolute",
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: "#f6f7fb",
+    zIndex: 100,
+  },
+  overlayHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === "ios" ? 56 : 24,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+    backgroundColor: "#fff",
+  },
+  overlayTitle: { fontSize: 18, fontWeight: "700" },
+  overlayClose: { fontSize: 20, color: "#888", paddingLeft: 16 },
+  overlayBody: { paddingHorizontal: 16, paddingTop: 12 },
+  overlayList: { flex: 1 },
+  overlayFooter: {
+    flexDirection: "row",
+    padding: 16,
+    paddingBottom: Platform.OS === "ios" ? 36 : 16,
+    borderTopWidth: 1,
+    borderTopColor: "#eee",
+    backgroundColor: "#fff",
+  },
+  selectAllRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  selectedCount: { fontSize: 13, color: "#888" },
+  selectAllBtn: { fontSize: 14, color: PURPLE, fontWeight: "600" },
+  selectRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+    backgroundColor: "#fff",
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 5,
+    borderWidth: 2,
+    borderColor: "#ccc",
+    marginRight: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkboxChecked: { backgroundColor: PURPLE, borderColor: PURPLE },
+  checkmark: { color: "#fff", fontSize: 13, fontWeight: "700" },
+
+  // Manual add contact
+  manualAddToggle: {
+    padding: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#eee",
+  },
+  manualAddToggleText: { color: PURPLE, fontWeight: "600", fontSize: 14 },
+  manualAddForm: { padding: 14, paddingTop: 4 },
 });
