@@ -147,6 +147,49 @@ export default function App() {
     setContactSelectVisible(true);
   }
 
+  async function syncAllPhoneContacts(): Promise<number> {
+    const { status } = await Contacts.requestPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert("Permission denied", "Enable contacts access in your phone Settings to sync.");
+      return 0;
+    }
+    const { data } = await Contacts.getContactsAsync({
+      fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+    });
+    const toSync = data
+      .filter((c) => c.name && c.phoneNumbers?.length)
+      .map((c) => ({ name: c.name!, phoneE164: normalizePhone(c.phoneNumbers![0].number ?? "") }))
+      .filter((c) => c.phoneE164.length >= 8);
+    if (toSync.length === 0) { Alert.alert("No contacts found"); return 0; }
+    const res = await fetchWithTimeout(`${getApiBase()}/users/${user!.id}/contacts/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contacts: toSync }),
+    });
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    const result = await res.json();
+    return result.added as number;
+  }
+
+  function promptAddContacts() {
+    Alert.alert("Add Contacts", "How would you like to add contacts?", [
+      {
+        text: "Sync phone contacts",
+        onPress: () =>
+          syncAllPhoneContacts()
+            .then((added) =>
+              Alert.alert("Done", `${added} new contact${added !== 1 ? "s" : ""} added.`)
+            )
+            .catch(() => Alert.alert("Error", "Could not sync contacts.")),
+      },
+      {
+        text: "Select contacts to include",
+        onPress: () => showContactSelect(() => {}),
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
+
   function hideContactSelect(added: number) {
     setContactSelectVisible(false);
     if (added > 0) {
@@ -198,7 +241,7 @@ export default function App() {
         <SettingsScreen
           user={user}
           onLogout={handleLogout}
-          onSyncContacts={() => showContactSelect(() => {})}
+          onSyncContacts={promptAddContacts}
         />
       )}
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
@@ -1235,7 +1278,7 @@ function SettingsScreen({
       )}
 
       <Pressable style={styles.syncBtn} onPress={onSyncContacts}>
-        <Text style={styles.syncBtnText}>Sync Phone Contacts</Text>
+        <Text style={styles.syncBtnText}>Add Contacts</Text>
       </Pressable>
 
       <Pressable style={styles.logoutBtn} onPress={confirmLogout}>
