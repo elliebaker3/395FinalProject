@@ -303,8 +303,8 @@ app.listen(PORT, () => {
   console.log(`CallWizard API http://localhost:${PORT}`);
 });
 
-// Run scheduler every hour at :00
-cron.schedule("0 * * * *", async () => {
+// Run scheduler every 5 minutes
+cron.schedule("*/5 * * * *", async () => {
   console.log("scheduler: running");
   try {
     await passFrequencyNudges();
