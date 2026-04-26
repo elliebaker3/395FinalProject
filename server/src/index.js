@@ -90,6 +90,31 @@ app.get("/users/:userId/contacts", async (req, res) => {
   }
 });
 
+app.post("/users/:userId/contacts/bulk", async (req, res) => {
+    const { userId } = req.params;
+    const { contacts } = req.body ?? {};
+    if (!Array.isArray(contacts)) {
+          return res.status(400).json({ error: "contacts must be an array" });
+    }
+    let added = 0;
+    try {
+          for (const { name, phoneE164 } of contacts) {
+                  if (!name || !phoneE164) continue;
+                  const r = await pool.query(
+                            `INSERT INTO contacts (owner_user_id, name, phone_e164)
+                                     VALUES ($1, $2, $3)
+                                              ON CONFLICT (owner_user_id, phone_e164) DO NOTHING`,
+                            [userId, name, phoneE164]
+                          );
+                  added += r.rowCount ?? 0;
+          }
+          res.json({ added });
+    } catch (e) {
+          console.error(e);
+          res.status(500).json({ error: "db_error" });
+    }
+});
+
 app.get("/users/:userId/preferences", async (req, res) => {
   const { userId } = req.params;
   try {
