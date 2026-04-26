@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Linking,
   Platform,
   Pressable,
@@ -139,6 +140,8 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [user, setUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("home");
+  const userRef = useRef<User | null>(null);
+  userRef.current = user;
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
@@ -155,8 +158,19 @@ export default function App() {
 
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data as { contactPhone?: string };
-      if (data?.contactPhone) openDialer(data.contactPhone);
+      const data = response.notification.request.content.data as {
+        contactPhone?: string;
+        contactId?: string;
+      };
+      if (!data?.contactPhone) return;
+      const u = userRef.current;
+      if (u && data.contactId) {
+        fetchWithTimeout(
+          `${getApiBase()}/users/${u.id}/contacts/${data.contactId}/called`,
+          { method: "POST" }
+        ).catch(() => {});
+      }
+      openDialer(data.contactPhone);
     });
     return () => sub.remove();
   }, []);
@@ -694,8 +708,16 @@ function HomeScreen({ user }: { user: User }) {
       .finally(() => setLoading(false));
   }, [user.id]);
 
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        apiFetchContacts(user.id).then(setContacts).catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, [user.id]);
+
   async function handleCall(contactId: string, phone: string) {
-    openDialer(phone);
     try {
       const res = await fetchWithTimeout(
         `${getApiBase()}/users/${user.id}/contacts/${contactId}/called`,
@@ -708,6 +730,7 @@ function HomeScreen({ user }: { user: User }) {
         );
       }
     } catch {}
+    openDialer(phone);
   }
 
   const recentlyCalledContact = contacts
