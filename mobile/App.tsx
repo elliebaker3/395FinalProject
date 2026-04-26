@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
+import * as Contacts from "expo-contacts";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 
@@ -138,6 +139,61 @@ export default function App() {
     setScreen("setup");
   }
 
+  async function syncPhoneContacts(userId: string): Promise<number> {
+    const { status } = await Contacts.requestPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert("Permission denied", "Enable contacts access in your phone Settings to sync.");
+      return 0;
+    }
+    const { data } = await Contacts.getContactsAsync({
+      fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+    });
+    const toSync = data
+      .filter((c) => c.name && c.phoneNumbers?.length)
+      .map((c) => ({
+        name: c.name!,
+        phoneE164: normalizePhone(c.phoneNumbers![0].number ?? ""),
+      }))
+      .filter((c) => c.phoneE164.length >= 8);
+
+    if (toSync.length === 0) return 0;
+
+    const res = await fetchWithTimeout(
+      `${getApiBase()}/users/${userId}/contacts/bulk`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contacts: toSync }),
+      }
+    );
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    const result = await res.json();
+    return result.added as number;
+  }
+
+  function promptContactSync(userId: string, onComplete: () => void) {
+    Alert.alert(
+      "Sync Contacts",
+      "Would you like to import your phone contacts into CallWizard?",
+      [
+        {
+          text: "Yes, sync contacts",
+          onPress: async () => {
+            try {
+              const added = await syncPhoneContacts(userId);
+              Alert.alert("Contacts synced", `${added} new contact${added !== 1 ? "s" : ""} added.`);
+            } catch {
+              Alert.alert("Sync failed", "Could not sync contacts. You can try again in Settings.");
+            } finally {
+              onComplete();
+            }
+          },
+        },
+        { text: "Not now", style: "cancel", onPress: onComplete },
+      ]
+    );
+  }
+
   async function handleLogout() {
     await AsyncStorage.removeItem(STORAGE_KEY);
     setUser(null);
@@ -163,7 +219,12 @@ export default function App() {
   }
 
   if (screen === "setup" && user) {
-    return <AvailabilitySetupScreen user={user} onDone={() => setScreen("app")} />;
+    return (
+      <AvailabilitySetupScreen
+        user={user}
+        onDone={() => promptContactSync(user.id, () => setScreen("app"))}
+      />
+    );
   }
 
   return (
@@ -172,7 +233,19 @@ export default function App() {
       {activeTab === "home" && user && <HomeScreen user={user} />}
       {activeTab === "schedule" && user && <ScheduleScreen user={user} />}
       {activeTab === "settings" && user && (
-        <SettingsScreen user={user} onLogout={handleLogout} />
+        <SettingsScreen
+          user={user}
+          onLogout={handleLogout}
+          onSyncContacts={() =>
+            syncPhoneContacts(user.id)
+              .then((added) =>
+                Alert.alert("Contacts synced", `${added} new contact${added !== 1 ? "s" : ""} added.`)
+              )
+              .catch(() =>
+                Alert.alert("Sync failed", "Could not sync contacts. Please try again.")
+              )
+          }
+        />
       )}
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
     </View>
@@ -451,6 +524,7 @@ function ScheduleScreen({ user }: { user: User }) {
   const [schedTime, setSchedTime] = useState("18:00");
   const [saving, setSaving] = useState(false);
   const [showContactList, setShowContactList] = useState(false);
+  const [contactSearch, setContactSearch] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -563,18 +637,34 @@ function ScheduleScreen({ user }: { user: User }) {
           </Pressable>
           {showContactList && (
             <View style={styles.contactList}>
-              {contacts.map((c) => (
-                <Pressable
-                  key={c.id}
-                  style={styles.contactListItem}
-                  onPress={() => { setSelContactId(c.id); setShowContactList(false); }}
-                >
-                  <Text style={styles.contactListName}>{c.name}</Text>
-                  <Text style={styles.contactListPhone}>{c.phone_e164}</Text>
-                </Pressable>
-              ))}
+              <TextInput
+                style={styles.contactSearch}
+                value={contactSearch}
+                onChangeText={setContactSearch}
+                placeholder="Search by name…"
+                autoCapitalize="none"
+                clearButtonMode="while-editing"
+              />
+              {contacts
+                .filter((c) =>
+                  c.name.toLowerCase().includes(contactSearch.toLowerCase())
+                )
+                .map((c) => (
+                  <Pressable
+                    key={c.id}
+                    style={styles.contactListItem}
+                    onPress={() => {
+                      setSelContactId(c.id);
+                      setShowContactList(false);
+                      setContactSearch("");
+                    }}
+                  >
+                    <Text style={styles.contactListName}>{c.name}</Text>
+                    <Text style={styles.contactListPhone}>{c.phone_e164}</Text>
+                  </Pressable>
+                ))}
               {contacts.length === 0 && (
-                <Text style={styles.emptyText}>No contacts added yet</Text>
+                <Text style={[styles.emptyText, { padding: 14 }]}>No contacts added yet</Text>
               )}
             </View>
           )}
@@ -782,7 +872,15 @@ const DEFAULT_WINDOWS: DayWindow[] = DAYS.map(() => ({
   end_time: "17:00",
 }));
 
-function SettingsScreen({ user, onLogout }: { user: User; onLogout: () => void }) {
+function SettingsScreen({
+  user,
+  onLogout,
+  onSyncContacts,
+}: {
+  user: User;
+  onLogout: () => void;
+  onSyncContacts: () => void;
+}) {
   const [timezone, setTimezone] = useState("UTC");
   const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
@@ -927,6 +1025,10 @@ function SettingsScreen({ user, onLogout }: { user: User; onLogout: () => void }
           </Pressable>
         </View>
       )}
+
+      <Pressable style={styles.syncBtn} onPress={onSyncContacts}>
+        <Text style={styles.syncBtnText}>Sync Phone Contacts</Text>
+      </Pressable>
 
       <Pressable style={styles.logoutBtn} onPress={confirmLogout}>
         <Text style={styles.logoutBtnText}>Log Out</Text>
@@ -1151,6 +1253,22 @@ const styles = StyleSheet.create({
   },
   timeSep: { marginHorizontal: 8, color: "#aaa", fontSize: 14 },
   dayOff: { fontSize: 13, color: "#ccc", marginLeft: 4 },
+  syncBtn: {
+    marginTop: 16,
+    borderWidth: 1.5,
+    borderColor: PURPLE,
+    borderRadius: 10,
+    padding: 16,
+    alignItems: "center",
+  },
+  syncBtnText: { color: PURPLE, fontWeight: "600", fontSize: 16 },
+  contactSearch: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+    padding: 12,
+    fontSize: 15,
+    backgroundColor: "#fafafa",
+  },
   logoutBtn: {
     marginTop: 32,
     borderWidth: 1.5,

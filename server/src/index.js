@@ -145,6 +145,27 @@ app.put("/users/:userId/preferences", async (req, res) => {
   }
 });
 
+app.post("/users/:userId/contacts/bulk", async (req, res) => {
+  const { userId } = req.params;
+  const { contacts } = req.body ?? {};
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return res.status(400).json({ error: "contacts array required" });
+  }
+  let added = 0;
+  for (const c of contacts) {
+    const { name, phoneE164 } = c;
+    if (!name || !phoneE164) continue;
+    const r = await pool.query(
+      `INSERT INTO contacts (owner_user_id, name, phone_e164, frequency_days)
+       VALUES ($1, $2, $3, 7)
+       ON CONFLICT (owner_user_id, phone_e164) DO NOTHING`,
+      [userId, name, phoneE164]
+    ).catch(() => ({ rowCount: 0 }));
+    if (r.rowCount > 0) added++;
+  }
+  res.json({ added });
+});
+
 app.get("/users/:userId/schedules", async (req, res) => {
   const { userId } = req.params;
   try {
