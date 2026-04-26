@@ -129,6 +129,7 @@ export default function App() {
     const u = await apiUpsertUser(displayName, phoneE164);
     await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(u));
     setUser(u);
+    await Contacts.requestPermissionsAsync();
     setScreen("app");
   }
 
@@ -145,49 +146,6 @@ export default function App() {
   function showContactSelect(onComplete: () => void) {
     setContactSelectCallback(() => onComplete);
     setContactSelectVisible(true);
-  }
-
-  async function syncAllPhoneContacts(): Promise<number> {
-    const { status } = await Contacts.requestPermissionsAsync();
-    if (status !== "granted") {
-      Alert.alert("Permission denied", "Enable contacts access in your phone Settings to sync.");
-      return 0;
-    }
-    const { data } = await Contacts.getContactsAsync({
-      fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
-    });
-    const toSync = data
-      .filter((c) => c.name && c.phoneNumbers?.length)
-      .map((c) => ({ name: c.name!, phoneE164: normalizePhone(c.phoneNumbers![0].number ?? "") }))
-      .filter((c) => c.phoneE164.length >= 8);
-    if (toSync.length === 0) { Alert.alert("No contacts found"); return 0; }
-    const res = await fetchWithTimeout(`${getApiBase()}/users/${user!.id}/contacts/bulk`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contacts: toSync }),
-    });
-    if (!res.ok) throw new Error(`Server error: ${res.status}`);
-    const result = await res.json();
-    return result.added as number;
-  }
-
-  function promptAddContacts() {
-    Alert.alert("Add Contacts", "How would you like to add contacts?", [
-      {
-        text: "Sync phone contacts",
-        onPress: () =>
-          syncAllPhoneContacts()
-            .then((added) =>
-              Alert.alert("Done", `${added} new contact${added !== 1 ? "s" : ""} added.`)
-            )
-            .catch(() => Alert.alert("Error", "Could not sync contacts.")),
-      },
-      {
-        text: "Select contacts to include",
-        onPress: () => showContactSelect(() => {}),
-      },
-      { text: "Cancel", style: "cancel" },
-    ]);
   }
 
   function hideContactSelect(added: number) {
@@ -227,7 +185,10 @@ export default function App() {
     return (
       <AvailabilitySetupScreen
         user={user}
-        onDone={() => showContactSelect(() => setScreen("app"))}
+        onDone={async () => {
+          await Contacts.requestPermissionsAsync();
+          setScreen("app");
+        }}
       />
     );
   }
@@ -241,7 +202,7 @@ export default function App() {
         <SettingsScreen
           user={user}
           onLogout={handleLogout}
-          onSyncContacts={promptAddContacts}
+          onSyncContacts={() => showContactSelect(() => {})}
         />
       )}
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
@@ -282,6 +243,10 @@ function ContactSelectScreen({
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [permDenied, setPermDenied] = useState(false);
+  const [showManualAdd, setShowManualAdd] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualPhone, setManualPhone] = useState("");
+  const [addingManual, setAddingManual] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -345,6 +310,32 @@ function ContactSelectScreen({
     }
   }
 
+  async function addManualContact() {
+    if (!manualName.trim()) { Alert.alert("Enter a name."); return; }
+    if (!manualPhone.trim()) { Alert.alert("Enter a phone number."); return; }
+    setAddingManual(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBase()}/users/${userId}/contacts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: manualName.trim(),
+          phoneE164: normalizePhone(manualPhone.trim()),
+          frequencyDays: 7,
+        }),
+      });
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      setManualName("");
+      setManualPhone("");
+      setShowManualAdd(false);
+      onDone(1);
+    } catch (e: unknown) {
+      Alert.alert("Error", e instanceof Error ? e.message : "Could not add contact.");
+    } finally {
+      setAddingManual(false);
+    }
+  }
+
   return (
     <View style={styles.overlay}>
       <StatusBar style="dark" />
@@ -358,14 +349,51 @@ function ContactSelectScreen({
       {loading ? (
         <ActivityIndicator color={PURPLE} style={{ marginTop: 40 }} />
       ) : permDenied ? (
-        <View style={styles.overlayBody}>
-          <Text style={styles.emptyText}>
-            Contacts permission denied. Enable it in your phone Settings.
+        <ScrollView style={styles.overlayList} contentContainerStyle={{ padding: 20 }}>
+          <Text style={[styles.emptyText, { marginBottom: 20 }]}>
+            Contacts permission denied. Enable it in your phone Settings to browse phone contacts.
           </Text>
-          <Pressable style={[styles.primaryBtn, { marginTop: 24 }]} onPress={onCancel}>
-            <Text style={styles.primaryBtnText}>Close</Text>
+          <Text style={styles.sectionTitle}>Add contact manually</Text>
+          <Pressable
+            style={styles.manualAddToggle}
+            onPress={() => setShowManualAdd((v) => !v)}
+          >
+            <Text style={styles.manualAddToggleText}>
+              {showManualAdd ? "− Cancel" : "+ Add contact manually"}
+            </Text>
           </Pressable>
-        </View>
+          {showManualAdd && (
+            <View style={styles.manualAddForm}>
+              <TextInput
+                style={styles.input}
+                value={manualName}
+                onChangeText={setManualName}
+                placeholder="Name"
+                autoCapitalize="words"
+              />
+              <TextInput
+                style={[styles.input, { marginTop: 8 }]}
+                value={manualPhone}
+                onChangeText={setManualPhone}
+                placeholder="+1 555 000 0000"
+                keyboardType="phone-pad"
+                autoCapitalize="none"
+              />
+              <Pressable
+                style={[styles.primaryBtn, { marginTop: 10 }, addingManual && styles.btnDisabled]}
+                onPress={addManualContact}
+                disabled={addingManual}
+              >
+                <Text style={styles.primaryBtnText}>
+                  {addingManual ? "Adding…" : "Add Contact"}
+                </Text>
+              </Pressable>
+            </View>
+          )}
+          <Pressable style={[styles.outlineBtn, { marginTop: 20 }]} onPress={onCancel}>
+            <Text style={styles.outlineBtnText}>Close</Text>
+          </Pressable>
+        </ScrollView>
       ) : (
         <>
           <View style={styles.overlayBody}>
@@ -416,6 +444,45 @@ function ContactSelectScreen({
             )}
           </ScrollView>
 
+          <View style={styles.overlayManualSection}>
+            <Pressable
+              style={styles.manualAddToggle}
+              onPress={() => setShowManualAdd((v) => !v)}
+            >
+              <Text style={styles.manualAddToggleText}>
+                {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
+              </Text>
+            </Pressable>
+            {showManualAdd && (
+              <View style={styles.manualAddForm}>
+                <TextInput
+                  style={styles.input}
+                  value={manualName}
+                  onChangeText={setManualName}
+                  placeholder="Name"
+                  autoCapitalize="words"
+                />
+                <TextInput
+                  style={[styles.input, { marginTop: 8 }]}
+                  value={manualPhone}
+                  onChangeText={setManualPhone}
+                  placeholder="+1 555 000 0000"
+                  keyboardType="phone-pad"
+                  autoCapitalize="none"
+                />
+                <Pressable
+                  style={[styles.primaryBtn, { marginTop: 10 }, addingManual && styles.btnDisabled]}
+                  onPress={addManualContact}
+                  disabled={addingManual}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {addingManual ? "Adding…" : "Add Contact"}
+                  </Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+
           <View style={styles.overlayFooter}>
             <Pressable
               style={[styles.primaryBtn, { flex: 1, marginRight: 8 }, syncing && styles.btnDisabled]}
@@ -423,7 +490,7 @@ function ContactSelectScreen({
               disabled={syncing}
             >
               <Text style={styles.primaryBtnText}>
-                {syncing ? "Syncing…" : `Sync ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
+                {syncing ? "Syncing…" : `Add ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
               </Text>
             </Pressable>
             <Pressable style={[styles.outlineBtn, { flex: 1 }]} onPress={onCancel}>
@@ -1566,6 +1633,11 @@ const styles = StyleSheet.create({
   overlayClose: { fontSize: 20, color: "#888", paddingLeft: 16 },
   overlayBody: { paddingHorizontal: 16, paddingTop: 12 },
   overlayList: { flex: 1 },
+  overlayManualSection: {
+    borderTopWidth: 1,
+    borderTopColor: "#eee",
+    backgroundColor: "#fff",
+  },
   overlayFooter: {
     flexDirection: "row",
     padding: 16,
