@@ -48,10 +48,10 @@ export async function passFrequencyNudges() {
        FROM contacts c
        WHERE c.owner_user_id = $1
          AND (
-           c.last_nudged_at IS NULL
-           OR c.last_nudged_at <= now() - COALESCE(c.frequency_days, 7) * interval '1 day'
+           c.last_notified_at IS NULL
+           OR c.last_notified_at <= now() - COALESCE(c.frequency_days, 7) * interval '1 day'
          )
-       ORDER BY c.last_nudged_at NULLS FIRST
+       ORDER BY c.last_notified_at NULLS FIRST
        LIMIT 1`,
       [u.id]
     );
@@ -68,7 +68,7 @@ export async function passFrequencyNudges() {
         body: `Tap to call ${contact.name}`,
         data: { contactPhone: contact.phone_e164, contactId: String(contact.id) },
       },
-      () => pool.query(`UPDATE contacts SET last_nudged_at = now() WHERE id = $1`, [contact.id])
+      () => pool.query(`UPDATE contacts SET last_notified_at = now() WHERE id = $1`, [contact.id])
     );
   }
 }

@@ -256,6 +256,23 @@ app.delete("/users/:userId/schedules/:scheduleId", async (req, res) => {
   }
 });
 
+app.post("/users/:userId/contacts/:contactId/called", async (req, res) => {
+  const { userId, contactId } = req.params;
+  try {
+    const r = await pool.query(
+      `UPDATE contacts SET last_nudged_at = now()
+       WHERE id = $1 AND owner_user_id = $2
+       RETURNING last_nudged_at`,
+      [contactId, userId]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: "contact_not_found" });
+    res.json({ last_nudged_at: r.rows[0].last_nudged_at });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
 /** Manual test: nudge a user to call a specific contact (by contact id). */
 app.post("/users/:userId/nudge", async (req, res) => {
   const { userId } = req.params;
@@ -291,7 +308,7 @@ app.post("/users/:userId/nudge", async (req, res) => {
         },
       }
     );
-    await pool.query(`UPDATE contacts SET last_nudged_at = now() WHERE id = $1`, [c.id]);
+    await pool.query(`UPDATE contacts SET last_notified_at = now() WHERE id = $1`, [c.id]);
     res.json(result);
   } catch (e) {
     console.error(e);

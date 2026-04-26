@@ -14,6 +14,7 @@
     "db:migrate": "node src/scripts/migrate-add-availability.js",
     "db:migrate:schedules": "node src/scripts/migrate-add-schedules.js",
     "db:migrate:contact-unique": "node src/scripts/migrate-add-contact-unique.js",
+    "db:migrate:last-notified": "node src/scripts/migrate-add-last-notified.js",
     "scheduler": "node src/scripts/run-scheduler-once.js"
   },
   "dependencies": {

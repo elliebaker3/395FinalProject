@@ -694,6 +694,22 @@ function HomeScreen({ user }: { user: User }) {
       .finally(() => setLoading(false));
   }, [user.id]);
 
+  async function handleCall(contactId: string, phone: string) {
+    openDialer(phone);
+    try {
+      const res = await fetchWithTimeout(
+        `${getApiBase()}/users/${user.id}/contacts/${contactId}/called`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        const { last_nudged_at } = await res.json();
+        setContacts((prev) =>
+          prev.map((c) => (c.id === contactId ? { ...c, last_nudged_at } : c))
+        );
+      }
+    } catch {}
+  }
+
   const recentlyCalledContact = contacts
     .filter((c) => c.last_nudged_at !== null)
     .sort(
@@ -722,7 +738,11 @@ function HomeScreen({ user }: { user: User }) {
       {loading ? (
         <ActivityIndicator color={PURPLE} style={styles.loader} />
       ) : recentlyCalledContact ? (
-        <ContactCard contact={recentlyCalledContact} callLabel="Call Again" />
+        <ContactCard
+          contact={recentlyCalledContact}
+          callLabel="Call Again"
+          onCall={handleCall}
+        />
       ) : (
         <EmptyCard message="No calls logged yet" />
       )}
@@ -731,7 +751,12 @@ function HomeScreen({ user }: { user: User }) {
       {loading ? (
         <ActivityIndicator color={PURPLE} style={styles.loader} />
       ) : recommendedContact ? (
-        <ContactCard contact={recommendedContact} callLabel="Call Now" highlight />
+        <ContactCard
+          contact={recommendedContact}
+          callLabel="Call Now"
+          highlight
+          onCall={handleCall}
+        />
       ) : (
         <EmptyCard message="No contacts added yet" />
       )}
@@ -743,16 +768,18 @@ function ContactCard({
   contact,
   callLabel,
   highlight = false,
+  onCall,
 }: {
   contact: Contact;
   callLabel: string;
   highlight?: boolean;
+  onCall: (contactId: string, phone: string) => void;
 }) {
   return (
     <View style={[styles.card, highlight && styles.cardHighlight]}>
       <Text style={styles.cardName}>{contact.name}</Text>
       <Text style={styles.cardPhone}>{contact.phone_e164}</Text>
-      <Pressable style={styles.callBtn} onPress={() => openDialer(contact.phone_e164)}>
+      <Pressable style={styles.callBtn} onPress={() => onCall(contact.id, contact.phone_e164)}>
         <Text style={styles.callBtnText}>Call {callLabel}</Text>
       </Pressable>
     </View>
