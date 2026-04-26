@@ -97,6 +97,27 @@ async function apiFetchContacts(userId: string): Promise<Contact[]> {
   return res.json();
 }
 
+async function registerPushToken(userId: string) {
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  const { status } =
+    existing === "granted"
+      ? { status: existing }
+      : await Notifications.requestPermissionsAsync();
+  if (status !== "granted") return;
+
+  const projectId =
+    (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)
+      ?.eas?.projectId;
+  if (!projectId) return;
+
+  const { data: expoPushToken } = await Notifications.getExpoPushTokenAsync({ projectId });
+  await fetchWithTimeout(`${getApiBase()}/users/${userId}/device-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expoPushToken }),
+  }).catch(() => {});
+}
+
 // ── Root ───────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -124,6 +145,11 @@ export default function App() {
     });
     return () => sub.remove();
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    registerPushToken(user.id);
+  }, [user?.id]);
 
   async function handleLogin(displayName: string, phoneE164: string) {
     const u = await apiUpsertUser(displayName, phoneE164);
