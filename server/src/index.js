@@ -145,6 +145,69 @@ app.put("/users/:userId/preferences", async (req, res) => {
   }
 });
 
+app.get("/users/:userId/schedules", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const r = await pool.query(
+      `SELECT cs.id, cs.contact_id, c.name AS contact_name, c.phone_e164 AS contact_phone,
+              cs.recurrence, cs.day_of_week, cs.day_of_month,
+              to_char(cs.scheduled_time, 'HH24:MI') AS scheduled_time
+       FROM contact_schedules cs
+       JOIN contacts c ON c.id = cs.contact_id
+       WHERE cs.user_id = $1
+       ORDER BY cs.created_at`,
+      [userId]
+    );
+    res.json(r.rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.post("/users/:userId/schedules", async (req, res) => {
+  const { userId } = req.params;
+  const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = req.body ?? {};
+  if (!contactId || !recurrence || !scheduledTime) {
+    return res.status(400).json({ error: "contactId, recurrence, scheduledTime required" });
+  }
+  if (recurrence === "monthly" && dayOfMonth == null) {
+    return res.status(400).json({ error: "dayOfMonth required for monthly recurrence" });
+  }
+  if (["weekly", "biweekly"].includes(recurrence) && dayOfWeek == null) {
+    return res.status(400).json({ error: "dayOfWeek required for weekly/biweekly recurrence" });
+  }
+  try {
+    const r = await pool.query(
+      `INSERT INTO contact_schedules (user_id, contact_id, recurrence, day_of_week, day_of_month, scheduled_time)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [userId, contactId, recurrence,
+       recurrence !== "monthly" ? dayOfWeek : null,
+       recurrence === "monthly" ? dayOfMonth : null,
+       scheduledTime]
+    );
+    res.status(201).json({ id: r.rows[0].id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.delete("/users/:userId/schedules/:scheduleId", async (req, res) => {
+  const { userId, scheduleId } = req.params;
+  try {
+    await pool.query(
+      `DELETE FROM contact_schedules WHERE id = $1 AND user_id = $2`,
+      [scheduleId, userId]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
 /** Manual test: nudge a user to call a specific contact (by contact id). */
 app.post("/users/:userId/nudge", async (req, res) => {
   const { userId } = req.params;

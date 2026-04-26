@@ -19,7 +19,7 @@ import { StatusBar } from "expo-status-bar";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Screen = "loading" | "login" | "signup" | "setup" | "app";
-type Tab = "home" | "settings";
+type Tab = "home" | "schedule" | "settings";
 
 interface User {
   id: string;
@@ -170,6 +170,7 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="dark" />
       {activeTab === "home" && user && <HomeScreen user={user} />}
+      {activeTab === "schedule" && user && <ScheduleScreen user={user} />}
       {activeTab === "settings" && user && (
         <SettingsScreen user={user} onLogout={handleLogout} />
       )}
@@ -397,6 +398,268 @@ function EmptyCard({ message }: { message: string }) {
     <View style={styles.card}>
       <Text style={styles.emptyText}>{message}</Text>
     </View>
+  );
+}
+
+// ── Schedule Screen ────────────────────────────────────────────────────────
+
+type Recurrence = "weekly" | "biweekly" | "monthly";
+
+interface CallSchedule {
+  id: string;
+  contact_id: string;
+  contact_name: string;
+  contact_phone: string;
+  recurrence: Recurrence;
+  day_of_week: number | null;
+  day_of_month: number | null;
+  scheduled_time: string;
+}
+
+const RECURRENCE_LABELS: Record<Recurrence, string> = {
+  weekly: "Weekly",
+  biweekly: "Biweekly",
+  monthly: "Monthly",
+};
+
+function fmt12h(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const hour = h % 12 || 12;
+  return `${hour}:${String(m).padStart(2, "0")} ${ampm}`;
+}
+
+function scheduleLabel(s: CallSchedule): string {
+  const time = fmt12h(s.scheduled_time);
+  if (s.recurrence === "monthly") return `Monthly · day ${s.day_of_month} · ${time}`;
+  const day = DAYS[s.day_of_week ?? 0];
+  const freq = s.recurrence === "biweekly" ? "Every 2 weeks" : "Weekly";
+  return `${freq} · ${day} · ${time}`;
+}
+
+function ScheduleScreen({ user }: { user: User }) {
+  const [schedules, setSchedules] = useState<CallSchedule[]>([]);
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+
+  // form state
+  const [selContactId, setSelContactId] = useState("");
+  const [recurrence, setRecurrence] = useState<Recurrence>("weekly");
+  const [dayOfWeek, setDayOfWeek] = useState(1); // Monday default
+  const [dayOfMonth, setDayOfMonth] = useState("1");
+  const [schedTime, setSchedTime] = useState("18:00");
+  const [saving, setSaving] = useState(false);
+  const [showContactList, setShowContactList] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules`).then((r) => r.json()),
+      fetchWithTimeout(`${getApiBase()}/users/${user.id}/contacts`).then((r) => r.json()),
+    ])
+      .then(([s, c]) => {
+        setSchedules(Array.isArray(s) ? s : []);
+        setContacts(Array.isArray(c) ? c : []);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [user.id]);
+
+  async function addSchedule() {
+    if (!selContactId) { Alert.alert("Select a contact."); return; }
+    if (!schedTime.match(/^\d{1,2}:\d{2}$/)) { Alert.alert("Enter time as HH:MM."); return; }
+    if (recurrence === "monthly") {
+      const dom = parseInt(dayOfMonth);
+      if (isNaN(dom) || dom < 1 || dom > 31) { Alert.alert("Enter a valid day of month (1–31)."); return; }
+    }
+    setSaving(true);
+    try {
+      const body: Record<string, unknown> = {
+        contactId: selContactId,
+        recurrence,
+        scheduledTime: schedTime,
+      };
+      if (recurrence !== "monthly") body.dayOfWeek = dayOfWeek;
+      else body.dayOfMonth = parseInt(dayOfMonth);
+
+      const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+
+      const refreshed = await fetchWithTimeout(
+        `${getApiBase()}/users/${user.id}/schedules`
+      ).then((r) => r.json());
+      setSchedules(Array.isArray(refreshed) ? refreshed : []);
+      setShowForm(false);
+      setSelContactId("");
+    } catch (e: unknown) {
+      Alert.alert("Error", e instanceof Error ? e.message : "Could not save schedule.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    try {
+      await fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules/${id}`, {
+        method: "DELETE",
+      });
+      setSchedules((prev) => prev.filter((s) => s.id !== id));
+    } catch {
+      Alert.alert("Error", "Could not delete schedule.");
+    }
+  }
+
+  const selectedContact = contacts.find((c) => c.id === selContactId);
+
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
+      <Text style={styles.greeting}>Scheduled Calls</Text>
+
+      {loading ? (
+        <ActivityIndicator color={PURPLE} style={styles.loader} />
+      ) : schedules.length === 0 && !showForm ? (
+        <View style={styles.card}>
+          <Text style={styles.emptyText}>No scheduled calls yet</Text>
+        </View>
+      ) : (
+        schedules.map((s) => (
+          <View key={s.id} style={styles.scheduleRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardName}>{s.contact_name}</Text>
+              <Text style={styles.scheduleDetail}>{scheduleLabel(s)}</Text>
+            </View>
+            <Pressable
+              style={styles.deleteBtn}
+              onPress={() =>
+                Alert.alert("Delete Schedule", `Remove reminder to call ${s.contact_name}?`, [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
+                ])
+              }
+            >
+              <Text style={styles.deleteBtnText}>✕</Text>
+            </Pressable>
+          </View>
+        ))
+      )}
+
+      {showForm ? (
+        <View style={[styles.card, { marginTop: 16 }]}>
+          <Text style={styles.sectionTitle}>New Scheduled Call</Text>
+
+          {/* Contact picker */}
+          <Text style={styles.settingsLabel}>CONTACT</Text>
+          <Pressable
+            style={styles.pickerBtn}
+            onPress={() => setShowContactList((v) => !v)}
+          >
+            <Text style={selectedContact ? styles.pickerBtnText : styles.pickerBtnPlaceholder}>
+              {selectedContact ? selectedContact.name : "Select a contact…"}
+            </Text>
+          </Pressable>
+          {showContactList && (
+            <View style={styles.contactList}>
+              {contacts.map((c) => (
+                <Pressable
+                  key={c.id}
+                  style={styles.contactListItem}
+                  onPress={() => { setSelContactId(c.id); setShowContactList(false); }}
+                >
+                  <Text style={styles.contactListName}>{c.name}</Text>
+                  <Text style={styles.contactListPhone}>{c.phone_e164}</Text>
+                </Pressable>
+              ))}
+              {contacts.length === 0 && (
+                <Text style={styles.emptyText}>No contacts added yet</Text>
+              )}
+            </View>
+          )}
+
+          {/* Recurrence */}
+          <Text style={styles.settingsLabel}>RECURRENCE</Text>
+          <View style={styles.segmentRow}>
+            {(["weekly", "biweekly", "monthly"] as Recurrence[]).map((r) => (
+              <Pressable
+                key={r}
+                style={[styles.segmentBtn, recurrence === r && styles.segmentBtnActive]}
+                onPress={() => setRecurrence(r)}
+              >
+                <Text style={[styles.segmentBtnText, recurrence === r && styles.segmentBtnTextActive]}>
+                  {RECURRENCE_LABELS[r]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {/* Day picker */}
+          {recurrence !== "monthly" ? (
+            <>
+              <Text style={styles.settingsLabel}>DAY OF WEEK</Text>
+              <View style={styles.dayPickerRow}>
+                {DAYS.map((label, i) => (
+                  <Pressable
+                    key={i}
+                    style={[styles.dayChip, dayOfWeek === i && styles.dayChipActive]}
+                    onPress={() => setDayOfWeek(i)}
+                  >
+                    <Text style={[styles.dayChipText, dayOfWeek === i && styles.dayChipTextActive]}>
+                      {label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.settingsLabel}>DAY OF MONTH (1–31)</Text>
+              <TextInput
+                style={[styles.input, { marginTop: 4 }]}
+                value={dayOfMonth}
+                onChangeText={setDayOfMonth}
+                keyboardType="number-pad"
+                maxLength={2}
+                placeholder="15"
+              />
+            </>
+          )}
+
+          {/* Time */}
+          <Text style={styles.settingsLabel}>TIME (HH:MM, 24-hour)</Text>
+          <TextInput
+            style={[styles.input, { marginTop: 4 }]}
+            value={schedTime}
+            onChangeText={setSchedTime}
+            placeholder="18:00"
+            keyboardType="numbers-and-punctuation"
+            maxLength={5}
+          />
+
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              style={[styles.primaryBtn, { flex: 1, marginRight: 8 }, saving && styles.btnDisabled]}
+              onPress={addSchedule}
+              disabled={saving}
+            >
+              <Text style={styles.primaryBtnText}>{saving ? "Saving…" : "Add Schedule"}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.outlineBtn, { flex: 1 }]}
+              onPress={() => setShowForm(false)}
+            >
+              <Text style={styles.outlineBtnText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable style={[styles.primaryBtn, { marginTop: 16 }]} onPress={() => setShowForm(true)}>
+          <Text style={styles.primaryBtnText}>+ Add Scheduled Call</Text>
+        </Pressable>
+      )}
+    </ScrollView>
   );
 }
 
@@ -681,22 +944,21 @@ function TabBar({
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
 }) {
+  const tabs: { key: Tab; label: string }[] = [
+    { key: "home", label: "Home" },
+    { key: "schedule", label: "Schedule" },
+    { key: "settings", label: "Settings" },
+  ];
   return (
     <View style={styles.tabBar}>
-      <Pressable style={styles.tabItem} onPress={() => onTabChange("home")}>
-        <Text style={styles.tabIcon}>{activeTab === "home" ? "⬤" : "○"}</Text>
-        <Text style={[styles.tabLabel, activeTab === "home" && styles.tabLabelActive]}>
-          Home
-        </Text>
-      </Pressable>
-      <Pressable style={styles.tabItem} onPress={() => onTabChange("settings")}>
-        <Text style={styles.tabIcon}>{activeTab === "settings" ? "⬤" : "○"}</Text>
-        <Text
-          style={[styles.tabLabel, activeTab === "settings" && styles.tabLabelActive]}
-        >
-          Settings
-        </Text>
-      </Pressable>
+      {tabs.map(({ key, label }) => (
+        <Pressable key={key} style={styles.tabItem} onPress={() => onTabChange(key)}>
+          <Text style={styles.tabIcon}>{activeTab === key ? "⬤" : "○"}</Text>
+          <Text style={[styles.tabLabel, activeTab === key && styles.tabLabelActive]}>
+            {label}
+          </Text>
+        </Pressable>
+      ))}
     </View>
   );
 }
@@ -780,6 +1042,77 @@ const styles = StyleSheet.create({
   },
   callBtnText: { color: "#fff", fontWeight: "600", fontSize: 15 },
   emptyText: { color: "#aaa", fontSize: 14 },
+
+  // Schedule
+  scheduleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 10,
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  scheduleDetail: { fontSize: 13, color: "#888", marginTop: 2 },
+  deleteBtn: { padding: 8 },
+  deleteBtnText: { fontSize: 16, color: "#e53e3e" },
+  pickerBtn: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 10,
+    padding: 14,
+    backgroundColor: "#fff",
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  pickerBtnText: { fontSize: 16, color: "#222" },
+  pickerBtnPlaceholder: { fontSize: 16, color: "#aaa" },
+  contactList: {
+    borderWidth: 1,
+    borderColor: "#eee",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    marginBottom: 8,
+  },
+  contactListItem: { padding: 14, borderBottomWidth: 1, borderBottomColor: "#f0f0f0" },
+  contactListName: { fontSize: 15, fontWeight: "600" },
+  contactListPhone: { fontSize: 13, color: "#888", marginTop: 2 },
+  segmentRow: { flexDirection: "row", marginTop: 6, marginBottom: 4 },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#ddd",
+    backgroundColor: "#f7f7f7",
+  },
+  segmentBtnActive: { backgroundColor: PURPLE, borderColor: PURPLE },
+  segmentBtnText: { fontSize: 13, color: "#666" },
+  segmentBtnTextActive: { color: "#fff", fontWeight: "600" },
+  dayPickerRow: { flexDirection: "row", flexWrap: "wrap", marginTop: 6, gap: 6 },
+  dayChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    backgroundColor: "#f7f7f7",
+  },
+  dayChipActive: { backgroundColor: PURPLE, borderColor: PURPLE },
+  dayChipText: { fontSize: 13, color: "#666" },
+  dayChipTextActive: { color: "#fff", fontWeight: "600" },
+  outlineBtn: {
+    borderWidth: 1.5,
+    borderColor: PURPLE,
+    borderRadius: 10,
+    padding: 14,
+    alignItems: "center",
+  },
+  outlineBtnText: { color: PURPLE, fontWeight: "600", fontSize: 15 },
 
   // Settings
   settingsLabel: { fontSize: 11, color: "#aaa", letterSpacing: 0.8, marginTop: 14, marginBottom: 2 },
