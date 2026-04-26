@@ -98,24 +98,39 @@ async function apiFetchContacts(userId: string): Promise<Contact[]> {
 }
 
 async function registerPushToken(userId: string) {
-  const { status: existing } = await Notifications.getPermissionsAsync();
-  const { status } =
-    existing === "granted"
-      ? { status: existing }
-      : await Notifications.requestPermissionsAsync();
-  if (status !== "granted") return;
+  try {
+    const { status: existing } = await Notifications.getPermissionsAsync();
+    const { status } =
+      existing === "granted"
+        ? { status: existing }
+        : await Notifications.requestPermissionsAsync();
+    if (status !== "granted") {
+      console.log("PUSH: permission denied");
+      return;
+    }
+    console.log("PUSH: permission granted");
 
-  const projectId =
-    (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)
-      ?.eas?.projectId;
-  if (!projectId) return;
+    const projectId =
+      (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)
+        ?.eas?.projectId;
+    if (!projectId) {
+      console.log("PUSH: no projectId in app.json");
+      return;
+    }
+    console.log("PUSH: projectId =", projectId);
 
-  const { data: expoPushToken } = await Notifications.getExpoPushTokenAsync({ projectId });
-  await fetchWithTimeout(`${getApiBase()}/users/${userId}/device-token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expoPushToken }),
-  }).catch(() => {});
+    const { data: expoPushToken } = await Notifications.getExpoPushTokenAsync({ projectId });
+    console.log("PUSH: token =", expoPushToken);
+
+    const res = await fetchWithTimeout(`${getApiBase()}/users/${userId}/device-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expoPushToken }),
+    });
+    console.log("PUSH: token saved, server status =", res.status);
+  } catch (e) {
+    console.log("PUSH: registration failed —", e instanceof Error ? e.message : e);
+  }
 }
 
 // ── Root ───────────────────────────────────────────────────────────────────
@@ -148,6 +163,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
+    console.log("USER ID:", user.id);
     registerPushToken(user.id);
   }, [user?.id]);
 

@@ -1,8 +1,10 @@
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
+import cron from "node-cron";
 import { pool } from "./db.js";
 import { sendNudge } from "./push.js";
+import { passFrequencyNudges, passScheduledCalls } from "./scheduler.js";
 
 const app = express();
 app.use(cors());
@@ -299,4 +301,16 @@ app.post("/users/:userId/nudge", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`CallWizard API http://localhost:${PORT}`);
+});
+
+// Run scheduler every hour at :00
+cron.schedule("0 * * * *", async () => {
+  console.log("scheduler: running");
+  try {
+    await passFrequencyNudges();
+    await passScheduledCalls();
+    console.log("scheduler: done");
+  } catch (e) {
+    console.error("scheduler error:", e.message);
+  }
 });
