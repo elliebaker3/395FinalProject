@@ -717,19 +717,18 @@ function HomeScreen({ user }: { user: User }) {
     return () => sub.remove();
   }, [user.id]);
 
-  async function handleCall(contactId: string, phone: string) {
-    try {
-      const res = await fetchWithTimeout(
-        `${getApiBase()}/users/${user.id}/contacts/${contactId}/called`,
-        { method: "POST" }
-      );
-      if (res.ok) {
-        const { last_nudged_at } = await res.json();
-        setContacts((prev) =>
-          prev.map((c) => (c.id === contactId ? { ...c, last_nudged_at } : c))
-        );
-      }
-    } catch {}
+  function handleCall(contactId: string, phone: string) {
+    // Update UI immediately — don't wait for the server
+    const now = new Date().toISOString();
+    setContacts((prev) =>
+      prev.map((c) => (c.id === contactId ? { ...c, last_nudged_at: now } : c))
+    );
+    // Sync to server in background
+    fetchWithTimeout(
+      `${getApiBase()}/users/${user.id}/contacts/${contactId}/called`,
+      { method: "POST" },
+      30000
+    ).catch(() => {});
     openDialer(phone);
   }
 
