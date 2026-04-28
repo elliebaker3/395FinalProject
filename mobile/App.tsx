@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   AppState,
+  Keyboard,
   Linking,
   Modal,
   Platform,
@@ -121,6 +122,7 @@ function isCompletePhone(raw: string): boolean {
 }
 
 const STORAGE_KEY = "callwizard_user";
+const STORAGE_TIMEZONE_KEY = "callwizard_timezone";
 
 // ── API ────────────────────────────────────────────────────────────────────
 
@@ -190,6 +192,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [user, setUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [persistedTimezone, setPersistedTimezone] = useState("UTC");
   const userRef = useRef<User | null>(null);
   userRef.current = user;
 
@@ -204,6 +207,19 @@ export default function App() {
       }
       setScreen("login");
     });
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_TIMEZONE_KEY)
+      .then((savedTz) => {
+        if (savedTz) setPersistedTimezone(savedTz);
+      })
+      .catch(() => {});
+  }, []);
+
+  const updatePersistedTimezone = useCallback((next: string) => {
+    setPersistedTimezone(next);
+    AsyncStorage.setItem(STORAGE_TIMEZONE_KEY, next).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -291,6 +307,8 @@ export default function App() {
     return (
       <AvailabilitySetupScreen
         user={user}
+        initialTimezone={persistedTimezone}
+        onTimezoneChange={updatePersistedTimezone}
         onDone={async () => {
           await Contacts.requestPermissionsAsync();
           setScreen("app");
@@ -309,6 +327,8 @@ export default function App() {
       {activeTab === "settings" && user && (
         <SettingsScreen
           user={user}
+          initialTimezone={persistedTimezone}
+          onTimezoneChange={updatePersistedTimezone}
           onLogout={handleLogout}
           onSyncContacts={() => showContactSelect(() => {})}
         />
@@ -919,6 +939,19 @@ interface CallSchedule {
   scheduled_time: string;
 }
 
+interface ContactDetail {
+  contact: Contact & { notes?: string | null };
+  schedules: Array<{
+    id: string;
+    contact_id: string;
+    recurrence: Recurrence;
+    day_of_week: number | null;
+    day_of_month: number | null;
+    scheduled_time: string;
+  }>;
+  call_history: Array<{ type: string; at: string }>;
+}
+
 const RECURRENCE_LABELS: Record<Recurrence, string> = {
   weekly: "Weekly",
   biweekly: "Biweekly",
@@ -988,6 +1021,7 @@ function TimezoneDropdown({
 }) {
   const [open, setOpen] = useState(false);
   const selected = TIMEZONE_OPTIONS.find((tz) => tz.value === value);
+  const selectedLabel = selected ? selected.label : value || "Select a timezone";
   const deviceTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const deviceMatch = TIMEZONE_OPTIONS.find((tz) => tz.value === deviceTimezone);
   const deviceLabel = deviceMatch
@@ -997,8 +1031,8 @@ function TimezoneDropdown({
   return (
     <View style={styles.timezoneWrap}>
       <Pressable style={styles.timezoneButton} onPress={() => setOpen((v) => !v)}>
-        <Text style={selected ? styles.timezoneButtonText : styles.timezonePlaceholder}>
-          {selected?.label ?? "Select a timezone"}
+        <Text style={value ? styles.timezoneButtonText : styles.timezonePlaceholder}>
+          {selectedLabel}
         </Text>
         <Text style={styles.timezoneChevron}>{open ? "▴" : "▾"}</Text>
       </Pressable>
@@ -1210,6 +1244,15 @@ function ScheduleScreen({ user }: { user: User }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [activeContactId, setActiveContactId] = useState<string | null>(null);
+  const [contactDetail, setContactDetail] = useState<ContactDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [notesDraft, setNotesDraft] = useState("");
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesLastSavedValue, setNotesLastSavedValue] = useState("");
+  const [notesLastSavedAt, setNotesLastSavedAt] = useState<string | null>(null);
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
+  const notesAutosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // form state
   const [selContactId, setSelContactId] = useState("");
@@ -1229,20 +1272,49 @@ function ScheduleScreen({ user }: { user: User }) {
   const [pickerMinute, setPickerMinute] = useState<string>("00");
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("PM");
 
-  useEffect(() => {
-    Promise.all([
+  async function refreshSchedulesAndContacts() {
+    const [s, c] = await Promise.all([
       fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules`).then((r) => r.json()),
       fetchWithTimeout(`${getApiBase()}/users/${user.id}/contacts`).then((r) => r.json()),
+    ]);
+    setSchedules(Array.isArray(s) ? s : []);
+    setContacts(Array.isArray(c) ? c : []);
+  }
+
+  async function loadContactDetail(contactId: string) {
+    const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/contacts/${contactId}`);
+    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+    const detail = (await res.json()) as ContactDetail;
+    const initialNotes = detail.contact.notes ?? "";
+    setContactDetail(detail);
+    setNotesDraft(initialNotes);
+    setNotesLastSavedValue(initialNotes);
+    setNotesLastSavedAt(null);
+    if (notesAutosaveTimerRef.current) {
+      clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    Promise.all([
+      refreshSchedulesAndContacts(),
     ])
-      .then(([s, c]) => {
-        setSchedules(Array.isArray(s) ? s : []);
-        setContacts(Array.isArray(c) ? c : []);
-      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [user.id]);
 
-  async function addSchedule() {
+  function resetScheduleForm() {
+    setRecurrence("weekly");
+    setDayOfWeek(1);
+    setDayOfMonth("1");
+    setSchedTime("18:00");
+    setShowContactList(false);
+    setContactSearch("");
+    setEditingScheduleId(null);
+  }
+
+  async function submitSchedule() {
     if (!selContactId) { Alert.alert("Select a contact."); return; }
     if (!schedTime.match(/^\d{1,2}:\d{2}$/)) { Alert.alert("Enter time as HH:MM."); return; }
     if (recurrence === "monthly") {
@@ -1259,19 +1331,24 @@ function ScheduleScreen({ user }: { user: User }) {
       if (recurrence !== "monthly") body.dayOfWeek = dayOfWeek;
       else body.dayOfMonth = parseInt(dayOfMonth);
 
-      const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules`, {
-        method: "POST",
+      const isEditing = Boolean(editingScheduleId);
+      const path = isEditing
+        ? `${getApiBase()}/users/${user.id}/schedules/${editingScheduleId}`
+        : `${getApiBase()}/users/${user.id}/schedules`;
+      const res = await fetchWithTimeout(path, {
+        method: isEditing ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
 
-      const refreshed = await fetchWithTimeout(
-        `${getApiBase()}/users/${user.id}/schedules`
-      ).then((r) => r.json());
-      setSchedules(Array.isArray(refreshed) ? refreshed : []);
+      await refreshSchedulesAndContacts();
+      if (activeContactId) {
+        await loadContactDetail(activeContactId);
+      }
       setShowForm(false);
       setSelContactId("");
+      resetScheduleForm();
     } catch (e: unknown) {
       Alert.alert("Error", e instanceof Error ? e.message : "Could not save schedule.");
     } finally {
@@ -1298,6 +1375,7 @@ function ScheduleScreen({ user }: { user: User }) {
         method: "DELETE",
       });
       setSchedules((prev) => prev.filter((s) => s.id !== id));
+      if (activeContactId) await loadContactDetail(activeContactId);
     } catch {
       Alert.alert("Error", "Could not delete schedule.");
     }
@@ -1325,6 +1403,8 @@ function ScheduleScreen({ user }: { user: User }) {
       setShowManualAdd(false);
       setManualName("");
       setManualPhone("");
+      await refreshSchedulesAndContacts();
+      if (activeContactId) await loadContactDetail(activeContactId);
     } catch (e: unknown) {
       Alert.alert("Error", e instanceof Error ? e.message : "Could not add contact.");
     } finally {
@@ -1332,25 +1412,213 @@ function ScheduleScreen({ user }: { user: User }) {
     }
   }
 
+  async function openContactDetail(contactId: string) {
+    setActiveContactId(contactId);
+    setSelContactId(contactId);
+    setDetailLoading(true);
+    setShowForm(false);
+    setEditingScheduleId(null);
+    try {
+      await loadContactDetail(contactId);
+    } catch {
+      Alert.alert("Error", "Could not load contact details.");
+      setActiveContactId(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  function startEditSchedule(s: CallSchedule) {
+    setSelContactId(s.contact_id);
+    setRecurrence(s.recurrence);
+    setDayOfWeek(s.day_of_week ?? 1);
+    setDayOfMonth(String(s.day_of_month ?? 1));
+    setSchedTime(s.scheduled_time);
+    setEditingScheduleId(s.id);
+    setShowForm(true);
+  }
+
+  function startAddScheduleForContact(contactId: string) {
+    setSelContactId(contactId);
+    setEditingScheduleId(null);
+    setRecurrence("weekly");
+    setDayOfWeek(1);
+    setDayOfMonth("1");
+    setSchedTime("18:00");
+    setShowForm(true);
+  }
+
+  async function saveContactNotes(nextNotes: string, contactId: string) {
+    setNotesSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/contacts/${contactId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: nextNotes }),
+      });
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      setNotesLastSavedValue(nextNotes);
+      setNotesLastSavedAt(new Date().toISOString());
+      setContactDetail((prev) =>
+        prev
+          ? { ...prev, contact: { ...prev.contact, notes: nextNotes } }
+          : prev
+      );
+    } catch (e: unknown) {
+      Alert.alert("Error", e instanceof Error ? e.message : "Could not save notes.");
+    } finally {
+      setNotesSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (notesAutosaveTimerRef.current) {
+        clearTimeout(notesAutosaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeContactId || !contactDetail) return;
+    if (notesDraft === notesLastSavedValue) return;
+
+    if (notesAutosaveTimerRef.current) {
+      clearTimeout(notesAutosaveTimerRef.current);
+    }
+    notesAutosaveTimerRef.current = setTimeout(() => {
+      void saveContactNotes(notesDraft, activeContactId);
+    }, 800);
+  }, [activeContactId, contactDetail, notesDraft, notesLastSavedValue]);
+
   const selectedContact = contacts.find((c) => c.id === selContactId);
+  const detailSchedules = schedules.filter((s) => s.contact_id === activeContactId);
+  const currentDetailContact = contactDetail?.contact ?? contacts.find((c) => c.id === activeContactId);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
-      <Text style={styles.greeting}>Scheduled Calls</Text>
+      <Text style={styles.greeting}>
+        {activeContactId ? currentDetailContact?.name ?? "Contact Details" : "Scheduled Calls"}
+      </Text>
+
+      {activeContactId ? (
+        <Pressable
+          style={[styles.outlineBtn, { marginTop: 8 }]}
+          onPress={() => {
+            setActiveContactId(null);
+            setContactDetail(null);
+            setShowForm(false);
+            setEditingScheduleId(null);
+          }}
+        >
+          <Text style={styles.outlineBtnText}>Back to all schedules</Text>
+        </Pressable>
+      ) : null}
 
       {loading ? (
         <ActivityIndicator color={PURPLE} style={styles.loader} />
+      ) : activeContactId ? (
+        detailLoading ? (
+          <ActivityIndicator color={PURPLE} style={styles.loader} />
+        ) : (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.cardName}>{currentDetailContact?.name ?? "Unknown contact"}</Text>
+              <Text style={styles.cardPhone}>
+                {currentDetailContact?.phone_e164
+                  ? formatPhoneDisplay(currentDetailContact.phone_e164)
+                  : "No phone number"}
+              </Text>
+            </View>
+
+            <Text style={styles.sectionTitle}>Past Call History</Text>
+            <View style={styles.card}>
+              {contactDetail?.call_history?.length ? (
+                contactDetail.call_history.map((item, idx) => (
+                  <Text key={`${item.at}-${idx}`} style={styles.scheduleDetail}>
+                    {item.type === "called" ? "Called" : "Event"} · {new Date(item.at).toLocaleString()}
+                  </Text>
+                ))
+              ) : (
+                <Text style={styles.emptyText}>No call history yet.</Text>
+              )}
+            </View>
+
+            <Text style={styles.sectionTitle}>Notes</Text>
+            <View style={styles.card}>
+              <TextInput
+                style={[styles.input, { minHeight: 100, textAlignVertical: "top" }]}
+                multiline
+                value={notesDraft}
+                onChangeText={setNotesDraft}
+                placeholder="Add notes for this contact..."
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={() => Keyboard.dismiss()}
+              />
+              {notesSaving ? (
+                <Text style={styles.notesMetaText}>Saving...</Text>
+              ) : notesLastSavedAt ? (
+                <Text style={styles.notesMetaText}>
+                  Last Saved at{" "}
+                  {new Date(notesLastSavedAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </Text>
+              ) : null}
+            </View>
+
+            <Text style={styles.sectionTitle}>Scheduled Calls</Text>
+            {detailSchedules.length === 0 && !showForm ? (
+              <View style={styles.card}>
+                <Text style={styles.emptyText}>No schedules for this contact yet.</Text>
+              </View>
+            ) : (
+              detailSchedules.map((s) => (
+                <Pressable key={s.id} style={styles.scheduleRow} onPress={() => startEditSchedule(s)}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.cardName}>{scheduleLabel(s)}</Text>
+                  </View>
+                  <Pressable
+                    style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
+                    onPress={() => startEditSchedule(s)}
+                  >
+                    <Text style={styles.outlineBtnText}>Edit</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.deleteBtn}
+                    onPress={() =>
+                      Alert.alert("Delete Schedule", "Remove this scheduled call?", [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
+                      ])
+                    }
+                  >
+                    <Text style={styles.deleteBtnText}>✕</Text>
+                  </Pressable>
+                </Pressable>
+              ))
+            )}
+          </>
+        )
       ) : schedules.length === 0 && !showForm ? (
         <View style={styles.card}>
           <Text style={styles.emptyText}>No scheduled calls yet</Text>
         </View>
       ) : (
         schedules.map((s) => (
-          <View key={s.id} style={styles.scheduleRow}>
+          <Pressable key={s.id} style={styles.scheduleRow} onPress={() => openContactDetail(s.contact_id)}>
             <View style={{ flex: 1 }}>
               <Text style={styles.cardName}>{s.contact_name}</Text>
               <Text style={styles.scheduleDetail}>{scheduleLabel(s)}</Text>
             </View>
+            <Pressable
+              style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
+              onPress={() => openContactDetail(s.contact_id)}
+            >
+              <Text style={styles.outlineBtnText}>Edit</Text>
+            </Pressable>
             <Pressable
               style={styles.deleteBtn}
               onPress={() =>
@@ -1362,90 +1630,99 @@ function ScheduleScreen({ user }: { user: User }) {
             >
               <Text style={styles.deleteBtnText}>✕</Text>
             </Pressable>
-          </View>
+          </Pressable>
         ))
       )}
 
       {showForm ? (
         <View style={[styles.card, { marginTop: 16 }]}>
-          <Text style={styles.sectionTitle}>New Scheduled Call</Text>
+          <Text style={styles.sectionTitle}>
+            {editingScheduleId ? "Edit Scheduled Call" : "New Scheduled Call"}
+          </Text>
 
           {/* Contact picker */}
           <Text style={styles.settingsLabel}>CONTACT</Text>
-          <Pressable
-            style={styles.pickerBtn}
-            onPress={() => setShowContactList((v) => !v)}
-          >
-            <Text style={selectedContact ? styles.pickerBtnText : styles.pickerBtnPlaceholder}>
-              {selectedContact ? selectedContact.name : "Select a contact…"}
-            </Text>
-          </Pressable>
-          {showContactList && (
-            <View style={styles.contactList}>
-              <TextInput
-                style={styles.contactSearch}
-                value={contactSearch}
-                onChangeText={setContactSearch}
-                placeholder="Search by name…"
-                autoCapitalize="none"
-                clearButtonMode="while-editing"
-              />
-              {contacts
-                .filter((c) =>
-                  c.name.toLowerCase().includes(contactSearch.toLowerCase())
-                )
-                .map((c) => (
-                  <Pressable
-                    key={c.id}
-                    style={styles.contactListItem}
-                    onPress={() => {
-                      setSelContactId(c.id);
-                      setShowContactList(false);
-                      setContactSearch("");
-                    }}
-                  >
-                    <Text style={styles.contactListName}>{c.name}</Text>
-                    <Text style={styles.contactListPhone}>{formatPhoneDisplay(c.phone_e164)}</Text>
-                  </Pressable>
-                ))}
-              {/* Manual add toggle */}
+          {activeContactId ? (
+            <View style={styles.pickerBtn}>
+              <Text style={styles.pickerBtnText}>{selectedContact?.name ?? "Selected contact"}</Text>
+            </View>
+          ) : (
+            <>
               <Pressable
-                style={styles.manualAddToggle}
-                onPress={() => setShowManualAdd((v) => !v)}
+                style={styles.pickerBtn}
+                onPress={() => setShowContactList((v) => !v)}
               >
-                <Text style={styles.manualAddToggleText}>
-                  {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
+                <Text style={selectedContact ? styles.pickerBtnText : styles.pickerBtnPlaceholder}>
+                  {selectedContact ? selectedContact.name : "Select a contact…"}
                 </Text>
               </Pressable>
-              {showManualAdd && (
-                <View style={styles.manualAddForm}>
+              {showContactList && (
+                <View style={styles.contactList}>
                   <TextInput
-                    style={styles.input}
-                    value={manualName}
-                    onChangeText={setManualName}
-                    placeholder="Name"
-                    autoCapitalize="words"
-                  />
-                  <TextInput
-                    style={[styles.input, { marginTop: 8 }]}
-                    value={manualPhone}
-                    onChangeText={setManualPhone}
-                    placeholder="+1 555-000-0000"
-                    keyboardType="phone-pad"
+                    style={styles.contactSearch}
+                    value={contactSearch}
+                    onChangeText={setContactSearch}
+                    placeholder="Search by name…"
                     autoCapitalize="none"
+                    clearButtonMode="while-editing"
                   />
+                  {contacts
+                    .filter((c) =>
+                      c.name.toLowerCase().includes(contactSearch.toLowerCase())
+                    )
+                    .map((c) => (
+                      <Pressable
+                        key={c.id}
+                        style={styles.contactListItem}
+                        onPress={() => {
+                          setSelContactId(c.id);
+                          setShowContactList(false);
+                          setContactSearch("");
+                        }}
+                      >
+                        <Text style={styles.contactListName}>{c.name}</Text>
+                        <Text style={styles.contactListPhone}>{formatPhoneDisplay(c.phone_e164)}</Text>
+                      </Pressable>
+                    ))}
                   <Pressable
-                    style={[styles.primaryBtn, { marginTop: 10 }, addingManual && styles.btnDisabled]}
-                    onPress={addManualContact}
-                    disabled={addingManual}
+                    style={styles.manualAddToggle}
+                    onPress={() => setShowManualAdd((v) => !v)}
                   >
-                    <Text style={styles.primaryBtnText}>
-                      {addingManual ? "Adding…" : "Add Contact"}
+                    <Text style={styles.manualAddToggleText}>
+                      {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
                     </Text>
                   </Pressable>
+                  {showManualAdd && (
+                    <View style={styles.manualAddForm}>
+                      <TextInput
+                        style={styles.input}
+                        value={manualName}
+                        onChangeText={setManualName}
+                        placeholder="Name"
+                        autoCapitalize="words"
+                      />
+                      <TextInput
+                        style={[styles.input, { marginTop: 8 }]}
+                        value={manualPhone}
+                        onChangeText={setManualPhone}
+                        placeholder="+1 555-000-0000"
+                        keyboardType="phone-pad"
+                        autoCapitalize="none"
+                      />
+                      <Pressable
+                        style={[styles.primaryBtn, { marginTop: 10 }, addingManual && styles.btnDisabled]}
+                        onPress={addManualContact}
+                        disabled={addingManual}
+                      >
+                        <Text style={styles.primaryBtnText}>
+                          {addingManual ? "Adding…" : "Add Contact"}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  )}
                 </View>
               )}
-            </View>
+            </>
           )}
 
           {/* Recurrence */}
@@ -1505,21 +1782,36 @@ function ScheduleScreen({ user }: { user: User }) {
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             <Pressable
               style={[styles.outlineBtn, { flex: 1, marginRight: 8 }]}
-              onPress={() => setShowForm(false)}
+              onPress={() => {
+                setShowForm(false);
+                setEditingScheduleId(null);
+              }}
             >
               <Text style={styles.outlineBtnText}>Cancel</Text>
             </Pressable>
             <Pressable
               style={[styles.primaryBtn, { flex: 1, marginTop: 0 }, saving && styles.btnDisabled]}
-              onPress={addSchedule}
+              onPress={submitSchedule}
               disabled={saving}
             >
-              <Text style={styles.primaryBtnText}>{saving ? "Saving…" : "Add Schedule"}</Text>
+              <Text style={styles.primaryBtnText}>
+                {saving ? "Saving…" : editingScheduleId ? "Save Changes" : "Add Schedule"}
+              </Text>
             </Pressable>
           </View>
         </View>
       ) : (
-        <Pressable style={[styles.primaryBtn, { marginTop: 16 }]} onPress={() => setShowForm(true)}>
+        <Pressable
+          style={[styles.primaryBtn, { marginTop: 16 }]}
+          onPress={() => {
+            if (activeContactId) {
+              startAddScheduleForContact(activeContactId);
+            } else {
+              setShowForm(true);
+              setEditingScheduleId(null);
+            }
+          }}
+        >
           <Text style={styles.primaryBtnText}>+ Add Scheduled Call</Text>
         </Pressable>
       )}
@@ -1542,8 +1834,18 @@ function ScheduleScreen({ user }: { user: User }) {
 
 // ── Availability Setup Screen (post-signup) ────────────────────────────────
 
-function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => void }) {
-  const [timezone, setTimezone] = useState("UTC");
+function AvailabilitySetupScreen({
+  user,
+  initialTimezone,
+  onTimezoneChange,
+  onDone,
+}: {
+  user: User;
+  initialTimezone: string;
+  onTimezoneChange: (next: string) => void;
+  onDone: () => void;
+}) {
+  const [timezone, setTimezone] = useState(initialTimezone || "UTC");
   const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -1552,6 +1854,10 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
   const [pickerHour, setPickerHour] = useState<number>(9);
   const [pickerMinute, setPickerMinute] = useState<string>("00");
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
+
+  useEffect(() => {
+    if (initialTimezone) setTimezone(initialTimezone);
+  }, [initialTimezone]);
 
   function updateWindow(dow: number, patch: Partial<DayWindow>) {
     setWindows((prev) => prev.map((w, i) => (i === dow ? { ...w, ...patch } : w)));
@@ -1588,6 +1894,7 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ timezone, availability }),
       });
+      onTimezoneChange(timezone);
     } catch {
       // non-fatal — user can update in Settings later
     } finally {
@@ -1607,7 +1914,13 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
 
       <View style={styles.card}>
         <Text style={styles.settingsLabel}>TIMEZONE</Text>
-        <TimezoneDropdown value={timezone} onChange={setTimezone} />
+        <TimezoneDropdown
+          value={timezone}
+          onChange={(next) => {
+            setTimezone(next);
+            onTimezoneChange(next);
+          }}
+        />
         <Text style={styles.settingsLabel}>AVAILABLE DAYS & TIMES</Text>
         {DAYS.map((label, dow) => (
           <View key={dow} style={styles.dayRow}>
@@ -1687,14 +2000,18 @@ const DEFAULT_WINDOWS: DayWindow[] = DAYS.map(() => ({
 
 function SettingsScreen({
   user,
+  initialTimezone,
+  onTimezoneChange,
   onLogout,
   onSyncContacts,
 }: {
   user: User;
+  initialTimezone: string;
+  onTimezoneChange: (next: string) => void;
   onLogout: () => void;
   onSyncContacts: () => void;
 }) {
-  const [timezone, setTimezone] = useState("UTC");
+  const [timezone, setTimezone] = useState(initialTimezone || "UTC");
   const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
   const [loadingPrefs, setLoadingPrefs] = useState(true);
@@ -1706,10 +2023,19 @@ function SettingsScreen({
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
 
   useEffect(() => {
+    if (initialTimezone) setTimezone(initialTimezone);
+  }, [initialTimezone]);
+
+  useEffect(() => {
     fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`)
       .then((r) => r.json())
       .then((data) => {
-        if (data.timezone) setTimezone(data.timezone);
+        // Only hydrate from server when app-level timezone has not been
+        // explicitly set by the user in this session.
+        if (data.timezone && (!initialTimezone || initialTimezone === "UTC")) {
+          setTimezone(data.timezone);
+          onTimezoneChange(data.timezone);
+        }
         if (Array.isArray(data.availability)) {
           const next = DEFAULT_WINDOWS.map((def, dow) => {
             const match = data.availability.find(
@@ -1724,7 +2050,7 @@ function SettingsScreen({
       })
       .catch(() => {})
       .finally(() => setLoadingPrefs(false));
-  }, [user.id]);
+  }, [user.id, initialTimezone]);
 
   function updateWindow(dow: number, patch: Partial<DayWindow>) {
     setWindows((prev) =>
@@ -1765,6 +2091,7 @@ function SettingsScreen({
         body: JSON.stringify({ timezone, availability }),
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      onTimezoneChange(timezone);
       Alert.alert("Saved", "Your preferences have been updated.");
     } catch (e: unknown) {
       Alert.alert("Error", e instanceof Error ? e.message : "Could not save preferences.");
@@ -1802,7 +2129,13 @@ function SettingsScreen({
       ) : (
         <View style={styles.card}>
           <Text style={styles.settingsLabel}>TIMEZONE</Text>
-          <TimezoneDropdown value={timezone} onChange={setTimezone} />
+          <TimezoneDropdown
+            value={timezone}
+            onChange={(next) => {
+              setTimezone(next);
+              onTimezoneChange(next);
+            }}
+          />
           <Text style={styles.settingsLabel}>AVAILABLE DAYS & TIMES</Text>
           {DAYS.map((label, dow) => (
             <View key={dow} style={styles.dayRow}>
@@ -2063,6 +2396,7 @@ const styles = StyleSheet.create({
   dayChipActive: { backgroundColor: PURPLE, borderColor: PURPLE },
   dayChipText: { fontSize: 13, color: "#666" },
   dayChipTextActive: { color: "#fff", fontWeight: "600" },
+  notesMetaText: { marginTop: 10, fontSize: 12, color: "#888" },
   outlineBtn: {
     borderWidth: 1.5,
     borderColor: PURPLE,
