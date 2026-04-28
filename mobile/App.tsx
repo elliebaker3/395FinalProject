@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   Linking,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -17,6 +18,7 @@ import Constants from "expo-constants";
 import * as Contacts from "expo-contacts";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -59,7 +61,7 @@ function getApiBase(): string {
 function openDialer(phone: string) {
   const cleaned = phone.replace(/\s/g, "");
   Linking.openURL(`tel:${cleaned}`).catch(() =>
-    Alert.alert("Could not open dialer", cleaned)
+    Alert.alert("Could not open dialer", formatPhoneDisplay(cleaned))
   );
 }
 
@@ -68,6 +70,54 @@ function normalizePhone(raw: string): string {
   if (raw.startsWith("+")) return "+" + digits;
   if (digits.length === 10) return "+1" + digits;
   return "+" + digits;
+}
+
+function formatUsPhoneInput(raw: string): string {
+  if (!raw) return "";
+  if (raw === "+") return "+";
+
+  const digits = raw.replace(/\D/g, "");
+  const startsWithPlus = raw.trimStart().startsWith("+");
+
+  // Keep country-code editing flexible (e.g. "+", "+4", "+44", "+358")
+  // until the user starts entering a local number.
+  if (startsWithPlus && !raw.includes(" ") && !raw.includes("-") && digits.length <= 3) {
+    return `+${digits}`;
+  }
+
+  let country = "1";
+  let localDigits = digits;
+  if (startsWithPlus && digits.length > 0) {
+    country = digits[0];
+    localDigits = digits.slice(1);
+  } else if (digits.startsWith("1")) {
+    localDigits = digits.slice(1);
+  }
+
+  const local = localDigits.slice(0, 10);
+  let formatted = `+${country}`;
+  if (local.length > 0) formatted += ` ${local.slice(0, 3)}`;
+  if (local.length >= 4) formatted += `-${local.slice(3, 6)}`;
+  if (local.length >= 7) formatted += `-${local.slice(6, 10)}`;
+  return formatted;
+}
+
+function formatPhoneDisplay(raw: string): string {
+  const normalized = normalizePhone(raw);
+  const digits = normalized.replace(/\D/g, "");
+  const usDigits = digits.length === 11 && digits.startsWith("1")
+    ? digits.slice(1)
+    : digits.length === 10
+      ? digits
+      : "";
+  if (usDigits.length !== 10) return normalized;
+  return `+1 ${usDigits.slice(0, 3)}-${usDigits.slice(3, 6)}-${usDigits.slice(6, 10)}`;
+}
+
+function isCompletePhone(raw: string): boolean {
+  const normalized = normalizePhone(raw);
+  const digits = normalized.replace(/\D/g, "");
+  return normalized.startsWith("+") && digits.length >= 8 && digits.length <= 15;
 }
 
 const STORAGE_KEY = "callwizard_user";
@@ -252,7 +302,9 @@ export default function App() {
   return (
     <View style={styles.root}>
       <StatusBar style="dark" />
-      {activeTab === "home" && user && <HomeScreen user={user} />}
+      {activeTab === "home" && user && (
+        <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
+      )}
       {activeTab === "schedule" && user && <ScheduleScreen user={user} />}
       {activeTab === "settings" && user && (
         <SettingsScreen
@@ -431,7 +483,7 @@ function ContactSelectScreen({
                 style={[styles.input, { marginTop: 8 }]}
                 value={manualPhone}
                 onChangeText={setManualPhone}
-                placeholder="+1 555 000 0000"
+                placeholder="+1 555-000-0000"
                 keyboardType="phone-pad"
                 autoCapitalize="none"
               />
@@ -490,7 +542,7 @@ function ContactSelectScreen({
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.contactListName}>{c.name}</Text>
-                    <Text style={styles.contactListPhone}>{c.phoneE164}</Text>
+                    <Text style={styles.contactListPhone}>{formatPhoneDisplay(c.phoneE164)}</Text>
                   </View>
                 </Pressable>
               );
@@ -522,7 +574,7 @@ function ContactSelectScreen({
                   style={[styles.input, { marginTop: 8 }]}
                   value={manualPhone}
                   onChangeText={setManualPhone}
-                  placeholder="+1 555 000 0000"
+                  placeholder="+1 555-000-0000"
                   keyboardType="phone-pad"
                   autoCapitalize="none"
                 />
@@ -541,16 +593,29 @@ function ContactSelectScreen({
 
           <View style={styles.overlayFooter}>
             <Pressable
-              style={[styles.primaryBtn, { flex: 1, marginRight: 8 }, syncing && styles.btnDisabled]}
+              style={[
+                styles.primaryBtn,
+                {
+                  flex: 1,
+                  marginRight: 8,
+                  marginTop: 0,
+                  backgroundColor: "#fff",
+                  borderWidth: 1.5,
+                  borderColor: PURPLE,
+                },
+              ]}
+              onPress={onCancel}
+            >
+              <Text style={[styles.primaryBtnText, { color: PURPLE }]}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.primaryBtn, { flex: 1, marginTop: 0 }, syncing && styles.btnDisabled]}
               onPress={syncSelected}
               disabled={syncing}
             >
               <Text style={styles.primaryBtnText}>
                 {syncing ? "Syncing…" : `Add ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
               </Text>
-            </Pressable>
-            <Pressable style={[styles.outlineBtn, { flex: 1 }]} onPress={onCancel}>
-              <Text style={styles.outlineBtnText}>Cancel</Text>
             </Pressable>
           </View>
         </>
@@ -569,12 +634,12 @@ function LoginScreen({
   onSignUp: () => void;
 }) {
   const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState("+1");
   const [loading, setLoading] = useState(false);
 
   async function submit() {
     if (!name.trim()) { Alert.alert("Enter your name."); return; }
-    if (!phone.trim()) { Alert.alert("Enter your phone number."); return; }
+    if (!isCompletePhone(phone)) { Alert.alert("Enter a valid phone number."); return; }
     setLoading(true);
     try {
       await onLogin(name.trim(), normalizePhone(phone.trim()));
@@ -589,7 +654,9 @@ function LoginScreen({
     <View style={styles.authContainer}>
       <StatusBar style="dark" />
       <Text style={styles.appTitle}>CallWizard</Text>
-      <Text style={styles.appSubtitle}>Stay connected with the people who matter</Text>
+      <Text style={[styles.appSubtitle, styles.appSubtitleItalic]}>
+        Stay connected with the people who matter
+      </Text>
       <Text style={styles.fieldLabel}>Name</Text>
       <TextInput
         style={styles.input}
@@ -603,8 +670,8 @@ function LoginScreen({
       <TextInput
         style={styles.input}
         value={phone}
-        onChangeText={setPhone}
-        placeholder="+1 555 000 0000"
+        onChangeText={(text) => setPhone(formatUsPhoneInput(text))}
+        placeholder="+1 555-000-0000"
         keyboardType="phone-pad"
         autoCapitalize="none"
         returnKeyType="done"
@@ -637,12 +704,12 @@ function SignUpScreen({
   onBack: () => void;
 }) {
   const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState("+1");
   const [loading, setLoading] = useState(false);
 
   async function submit() {
     if (!name.trim()) { Alert.alert("Enter your name."); return; }
-    if (!phone.trim()) { Alert.alert("Enter your phone number."); return; }
+    if (!isCompletePhone(phone)) { Alert.alert("Enter a valid phone number."); return; }
     setLoading(true);
     try {
       await onSignUp(name.trim(), normalizePhone(phone.trim()));
@@ -671,8 +738,8 @@ function SignUpScreen({
       <TextInput
         style={styles.input}
         value={phone}
-        onChangeText={setPhone}
-        placeholder="+1 555 000 0000"
+        onChangeText={(text) => setPhone(formatUsPhoneInput(text))}
+        placeholder="+1 555-000-0000"
         keyboardType="phone-pad"
         autoCapitalize="none"
         returnKeyType="done"
@@ -697,7 +764,13 @@ function SignUpScreen({
 
 // ── Home Screen ────────────────────────────────────────────────────────────
 
-function HomeScreen({ user }: { user: User }) {
+function HomeScreen({
+  user,
+  onSyncContacts,
+}: {
+  user: User;
+  onSyncContacts: () => void;
+}) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -779,6 +852,8 @@ function HomeScreen({ user }: { user: User }) {
           highlight
           onCall={handleCall}
         />
+      ) : contacts.length === 0 ? (
+        <AddContactsPromptCard onSyncContacts={onSyncContacts} />
       ) : (
         <EmptyCard message="No contacts added yet" />
       )}
@@ -800,7 +875,7 @@ function ContactCard({
   return (
     <View style={[styles.card, highlight && styles.cardHighlight]}>
       <Text style={styles.cardName}>{contact.name}</Text>
-      <Text style={styles.cardPhone}>{contact.phone_e164}</Text>
+      <Text style={styles.cardPhone}>{formatPhoneDisplay(contact.phone_e164)}</Text>
       <Pressable style={styles.callBtn} onPress={() => onCall(contact.id, contact.phone_e164)}>
         <Text style={styles.callBtnText}>Call {callLabel}</Text>
       </Pressable>
@@ -812,6 +887,19 @@ function EmptyCard({ message }: { message: string }) {
   return (
     <View style={styles.card}>
       <Text style={styles.emptyText}>{message}</Text>
+    </View>
+  );
+}
+
+function AddContactsPromptCard({ onSyncContacts }: { onSyncContacts: () => void }) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.emptyText}>
+        Add contacts to start getting personalized reach-out suggestions.
+      </Text>
+      <Pressable style={styles.homeAddContactsBtn} onPress={onSyncContacts}>
+        <Text style={styles.homeAddContactsBtnText}>Add Contacts</Text>
+      </Pressable>
     </View>
   );
 }
@@ -844,6 +932,271 @@ function fmt12h(hhmm: string): string {
   return `${hour}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
+function parseTime12h(hhmm: string): { hour: number; minute: string; ampm: "AM" | "PM" } {
+  const [rawHour, rawMinute] = hhmm.split(":");
+  const hour24 = Number(rawHour);
+  const minute = String(Number(rawMinute ?? "0")).padStart(2, "0");
+  const ampm: "AM" | "PM" = hour24 >= 12 ? "PM" : "AM";
+  const hour = hour24 % 12 || 12;
+  return { hour, minute, ampm };
+}
+
+function to24hTime(hour12: number, minute: string, ampm: "AM" | "PM"): string {
+  let hour24 = hour12 % 12;
+  if (ampm === "PM") hour24 += 12;
+  return `${String(hour24).padStart(2, "0")}:${minute}`;
+}
+
+function roundMinuteToFive(minute: string): string {
+  const n = Number(minute);
+  if (Number.isNaN(n)) return "00";
+  const rounded = Math.round(n / 5) * 5;
+  return String(Math.min(55, Math.max(0, rounded))).padStart(2, "0");
+}
+
+const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "Pacific/Honolulu", label: "Honolulu (HST) - Pacific/Honolulu" },
+  { value: "America/Anchorage", label: "Anchorage (AKST) - America/Anchorage" },
+  { value: "America/Los_Angeles", label: "Los Angeles (PT) - America/Los_Angeles" },
+  { value: "America/Denver", label: "Denver (MT) - America/Denver" },
+  { value: "America/Chicago", label: "Chicago (CT) - America/Chicago" },
+  { value: "America/New_York", label: "New York (ET) - America/New_York" },
+  { value: "America/Halifax", label: "Halifax (AT) - America/Halifax" },
+  { value: "America/Sao_Paulo", label: "Sao Paulo - America/Sao_Paulo" },
+  { value: "Atlantic/Reykjavik", label: "Reykjavik (GMT) - Atlantic/Reykjavik" },
+  { value: "Europe/London", label: "London - Europe/London" },
+  { value: "Europe/Paris", label: "Paris - Europe/Paris" },
+  { value: "Europe/Berlin", label: "Berlin - Europe/Berlin" },
+  { value: "Europe/Athens", label: "Athens - Europe/Athens" },
+  { value: "Asia/Dubai", label: "Dubai - Asia/Dubai" },
+  { value: "Asia/Karachi", label: "Karachi - Asia/Karachi" },
+  { value: "Asia/Kolkata", label: "Mumbai/Delhi - Asia/Kolkata" },
+  { value: "Asia/Bangkok", label: "Bangkok - Asia/Bangkok" },
+  { value: "Asia/Singapore", label: "Singapore - Asia/Singapore" },
+  { value: "Asia/Hong_Kong", label: "Hong Kong - Asia/Hong_Kong" },
+  { value: "Asia/Tokyo", label: "Tokyo - Asia/Tokyo" },
+  { value: "Australia/Sydney", label: "Sydney - Australia/Sydney" },
+  { value: "Pacific/Auckland", label: "Auckland - Pacific/Auckland" },
+].sort((a, b) => a.label.localeCompare(b.label));
+
+function TimezoneDropdown({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = TIMEZONE_OPTIONS.find((tz) => tz.value === value);
+  const deviceTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const deviceMatch = TIMEZONE_OPTIONS.find((tz) => tz.value === deviceTimezone);
+  const deviceLabel = deviceMatch
+    ? `Auto-detect: ${deviceMatch.label}`
+    : `Auto-detect: ${deviceTimezone}`;
+
+  return (
+    <View style={styles.timezoneWrap}>
+      <Pressable style={styles.timezoneButton} onPress={() => setOpen((v) => !v)}>
+        <Text style={selected ? styles.timezoneButtonText : styles.timezonePlaceholder}>
+          {selected?.label ?? "Select a timezone"}
+        </Text>
+        <Text style={styles.timezoneChevron}>{open ? "▴" : "▾"}</Text>
+      </Pressable>
+      {open && (
+        <View style={styles.timezoneMenu}>
+          <ScrollView style={styles.timezoneMenuScroll} nestedScrollEnabled>
+            <Pressable
+              style={[styles.timezoneOption, styles.timezoneAutoOption]}
+              onPress={() => {
+                onChange(deviceTimezone);
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.timezoneAutoOptionText}>{deviceLabel}</Text>
+            </Pressable>
+            {TIMEZONE_OPTIONS.map((tz) => (
+              <Pressable
+                key={tz.value}
+                style={[styles.timezoneOption, value === tz.value && styles.timezoneOptionActive]}
+                onPress={() => {
+                  onChange(tz.value);
+                  setOpen(false);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.timezoneOptionText,
+                    value === tz.value && styles.timezoneOptionTextActive,
+                  ]}
+                >
+                  {tz.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function TimePickerModal({
+  visible,
+  title,
+  hour,
+  minute,
+  ampm,
+  onHourChange,
+  onMinuteChange,
+  onAmPmChange,
+  onCancel,
+  onConfirm,
+}: {
+  visible: boolean;
+  title: string;
+  hour: number;
+  minute: string;
+  ampm: "AM" | "PM";
+  onHourChange: (hour: number) => void;
+  onMinuteChange: (minute: string) => void;
+  onAmPmChange: (ampm: "AM" | "PM") => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const hourRef = useRef<ScrollView | null>(null);
+  const minuteRef = useRef<ScrollView | null>(null);
+  const ampmRef = useRef<ScrollView | null>(null);
+  const minuteOptions = Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, "0"));
+
+  function clampIndex(index: number, max: number): number {
+    return Math.max(0, Math.min(max, index));
+  }
+
+  function snapIndexFromOffset(offsetY: number, maxIndex: number): number {
+    return clampIndex(Math.round(offsetY / TIME_PICKER_ROW_HEIGHT), maxIndex);
+  }
+
+  function snapHour(offsetY: number) {
+    const idx = snapIndexFromOffset(offsetY, 11);
+    onHourChange(idx + 1);
+    hourRef.current?.scrollTo({ y: idx * TIME_PICKER_ROW_HEIGHT, animated: true });
+  }
+
+  function snapMinute(offsetY: number) {
+    const idx = snapIndexFromOffset(offsetY, minuteOptions.length - 1);
+    onMinuteChange(minuteOptions[idx]);
+    minuteRef.current?.scrollTo({ y: idx * TIME_PICKER_ROW_HEIGHT, animated: true });
+  }
+
+  function snapAmPm(offsetY: number) {
+    const idx = snapIndexFromOffset(offsetY, 1);
+    const next = idx === 0 ? "AM" : "PM";
+    onAmPmChange(next);
+    ampmRef.current?.scrollTo({ y: idx * TIME_PICKER_ROW_HEIGHT, animated: true });
+  }
+
+  useEffect(() => {
+    if (!visible) return;
+    const minuteIdx = Math.max(0, minuteOptions.indexOf(minute));
+    const ampmIdx = ampm === "AM" ? 0 : 1;
+    const id = setTimeout(() => {
+      hourRef.current?.scrollTo({ y: (hour - 1) * TIME_PICKER_ROW_HEIGHT, animated: false });
+      minuteRef.current?.scrollTo({ y: minuteIdx * TIME_PICKER_ROW_HEIGHT, animated: false });
+      ampmRef.current?.scrollTo({ y: ampmIdx * TIME_PICKER_ROW_HEIGHT, animated: false });
+    }, 0);
+    return () => clearTimeout(id);
+  }, [visible, hour, minute, ampm]);
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <View style={styles.timePickerBackdrop}>
+        <View style={styles.timePickerCard}>
+          <Text style={styles.timePickerTitle}>{title}</Text>
+          <View style={styles.timePickerWheel}>
+            <View style={styles.timePickerSelectionBar} pointerEvents="none" />
+            <View style={styles.timePickerColumns}>
+            <ScrollView
+              ref={hourRef}
+              style={styles.timePickerCol}
+              contentContainerStyle={styles.timePickerColContent}
+              showsVerticalScrollIndicator={false}
+              snapToInterval={TIME_PICKER_ROW_HEIGHT}
+              decelerationRate="normal"
+              bounces={false}
+              onMomentumScrollEnd={(e) => snapHour(e.nativeEvent.contentOffset.y)}
+            >
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((h) => (
+                <Pressable
+                  key={`h-${h}`}
+                  style={[styles.timePickerItem, hour === h && styles.timePickerItemActive]}
+                  onPress={() => onHourChange(h)}
+                >
+                  <Text style={[styles.timePickerItemText, hour === h && styles.timePickerItemTextActive]}>
+                    {h}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <ScrollView
+              ref={minuteRef}
+              style={styles.timePickerCol}
+              contentContainerStyle={styles.timePickerColContent}
+              showsVerticalScrollIndicator={false}
+              snapToInterval={TIME_PICKER_ROW_HEIGHT}
+              decelerationRate="normal"
+              bounces={false}
+              onMomentumScrollEnd={(e) => snapMinute(e.nativeEvent.contentOffset.y)}
+            >
+              {minuteOptions.map((m) => (
+                <Pressable
+                  key={`m-${m}`}
+                  style={[styles.timePickerItem, minute === m && styles.timePickerItemActive]}
+                  onPress={() => onMinuteChange(m)}
+                >
+                  <Text style={[styles.timePickerItemText, minute === m && styles.timePickerItemTextActive]}>
+                    {m}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <ScrollView
+              ref={ampmRef}
+              style={[styles.timePickerCol, styles.timePickerColLast]}
+              contentContainerStyle={styles.timePickerColContent}
+              showsVerticalScrollIndicator={false}
+              snapToInterval={TIME_PICKER_ROW_HEIGHT}
+              decelerationRate="normal"
+              bounces={false}
+              onMomentumScrollEnd={(e) => snapAmPm(e.nativeEvent.contentOffset.y)}
+            >
+              {(["AM", "PM"] as const).map((v) => (
+                <Pressable
+                  key={`a-${v}`}
+                  style={[styles.timePickerItem, ampm === v && styles.timePickerItemActive]}
+                  onPress={() => onAmPmChange(v)}
+                >
+                  <Text style={[styles.timePickerItemText, ampm === v && styles.timePickerItemTextActive]}>
+                    {v}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            </View>
+          </View>
+          <View style={styles.timePickerActions}>
+            <Pressable style={[styles.outlineBtn, { flex: 1, marginRight: 8 }]} onPress={onCancel}>
+              <Text style={styles.outlineBtnText}>Cancel</Text>
+            </Pressable>
+            <Pressable style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onConfirm}>
+              <Text style={styles.primaryBtnText}>Set Time</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function scheduleLabel(s: CallSchedule): string {
   const time = fmt12h(s.scheduled_time);
   if (s.recurrence === "monthly") return `Monthly · day ${s.day_of_month} · ${time}`;
@@ -871,6 +1224,10 @@ function ScheduleScreen({ user }: { user: User }) {
   const [manualName, setManualName] = useState("");
   const [manualPhone, setManualPhone] = useState("");
   const [addingManual, setAddingManual] = useState(false);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pickerHour, setPickerHour] = useState<number>(6);
+  const [pickerMinute, setPickerMinute] = useState<string>("00");
+  const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("PM");
 
   useEffect(() => {
     Promise.all([
@@ -920,6 +1277,19 @@ function ScheduleScreen({ user }: { user: User }) {
     } finally {
       setSaving(false);
     }
+  }
+
+  function openScheduleTimePicker() {
+    const parsed = parseTime12h(schedTime);
+    setPickerHour(parsed.hour);
+    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerAmPm(parsed.ampm);
+    setPickerVisible(true);
+  }
+
+  function saveScheduledTime() {
+    setSchedTime(to24hTime(pickerHour, pickerMinute, pickerAmPm));
+    setPickerVisible(false);
   }
 
   async function deleteSchedule(id: string) {
@@ -1035,7 +1405,7 @@ function ScheduleScreen({ user }: { user: User }) {
                     }}
                   >
                     <Text style={styles.contactListName}>{c.name}</Text>
-                    <Text style={styles.contactListPhone}>{c.phone_e164}</Text>
+                    <Text style={styles.contactListPhone}>{formatPhoneDisplay(c.phone_e164)}</Text>
                   </Pressable>
                 ))}
               {/* Manual add toggle */}
@@ -1060,7 +1430,7 @@ function ScheduleScreen({ user }: { user: User }) {
                     style={[styles.input, { marginTop: 8 }]}
                     value={manualPhone}
                     onChangeText={setManualPhone}
-                    placeholder="+1 555 000 0000"
+                    placeholder="+1 555-000-0000"
                     keyboardType="phone-pad"
                     autoCapitalize="none"
                   />
@@ -1127,29 +1497,24 @@ function ScheduleScreen({ user }: { user: User }) {
           )}
 
           {/* Time */}
-          <Text style={styles.settingsLabel}>TIME (HH:MM, 24-hour)</Text>
-          <TextInput
-            style={[styles.input, { marginTop: 4 }]}
-            value={schedTime}
-            onChangeText={setSchedTime}
-            placeholder="18:00"
-            keyboardType="numbers-and-punctuation"
-            maxLength={5}
-          />
+          <Text style={styles.settingsLabel}>TIME</Text>
+          <Pressable style={[styles.input, styles.timeField]} onPress={openScheduleTimePicker}>
+            <Text style={styles.timeFieldText}>{fmt12h(schedTime)}</Text>
+          </Pressable>
 
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             <Pressable
-              style={[styles.primaryBtn, { flex: 1, marginRight: 8 }, saving && styles.btnDisabled]}
+              style={[styles.outlineBtn, { flex: 1, marginRight: 8 }]}
+              onPress={() => setShowForm(false)}
+            >
+              <Text style={styles.outlineBtnText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.primaryBtn, { flex: 1, marginTop: 0 }, saving && styles.btnDisabled]}
               onPress={addSchedule}
               disabled={saving}
             >
               <Text style={styles.primaryBtnText}>{saving ? "Saving…" : "Add Schedule"}</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.outlineBtn, { flex: 1 }]}
-              onPress={() => setShowForm(false)}
-            >
-              <Text style={styles.outlineBtnText}>Cancel</Text>
             </Pressable>
           </View>
         </View>
@@ -1158,6 +1523,19 @@ function ScheduleScreen({ user }: { user: User }) {
           <Text style={styles.primaryBtnText}>+ Add Scheduled Call</Text>
         </Pressable>
       )}
+
+      <TimePickerModal
+        visible={pickerVisible}
+        title="Choose schedule time"
+        hour={pickerHour}
+        minute={pickerMinute}
+        ampm={pickerAmPm}
+        onHourChange={setPickerHour}
+        onMinuteChange={setPickerMinute}
+        onAmPmChange={setPickerAmPm}
+        onCancel={() => setPickerVisible(false)}
+        onConfirm={saveScheduledTime}
+      />
     </ScrollView>
   );
 }
@@ -1168,9 +1546,33 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
   const [timezone, setTimezone] = useState("UTC");
   const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pickerDow, setPickerDow] = useState<number | null>(null);
+  const [pickerField, setPickerField] = useState<"start_time" | "end_time">("start_time");
+  const [pickerHour, setPickerHour] = useState<number>(9);
+  const [pickerMinute, setPickerMinute] = useState<string>("00");
+  const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
 
   function updateWindow(dow: number, patch: Partial<DayWindow>) {
     setWindows((prev) => prev.map((w, i) => (i === dow ? { ...w, ...patch } : w)));
+  }
+
+  function openTimePicker(dow: number, field: "start_time" | "end_time") {
+    const current = windows[dow][field];
+    const parsed = parseTime12h(current);
+    setPickerDow(dow);
+    setPickerField(field);
+    setPickerHour(parsed.hour);
+    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerAmPm(parsed.ampm);
+    setPickerVisible(true);
+  }
+
+  function savePickedTime() {
+    if (pickerDow === null) return;
+    const next = to24hTime(pickerHour, pickerMinute, pickerAmPm);
+    updateWindow(pickerDow, { [pickerField]: next });
+    setPickerVisible(false);
   }
 
   async function save() {
@@ -1205,14 +1607,7 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
 
       <View style={styles.card}>
         <Text style={styles.settingsLabel}>TIMEZONE</Text>
-        <TextInput
-          style={[styles.input, styles.timezoneInput]}
-          value={timezone}
-          onChangeText={setTimezone}
-          placeholder="e.g. America/New_York"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        <TimezoneDropdown value={timezone} onChange={setTimezone} />
         <Text style={styles.settingsLabel}>AVAILABLE DAYS & TIMES</Text>
         {DAYS.map((label, dow) => (
           <View key={dow} style={styles.dayRow}>
@@ -1226,23 +1621,19 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
             </Pressable>
             {windows[dow].enabled ? (
               <View style={styles.timeRange}>
-                <TextInput
+                <Pressable
                   style={styles.timeInput}
-                  value={windows[dow].start_time}
-                  onChangeText={(v) => updateWindow(dow, { start_time: v })}
-                  placeholder="09:00"
-                  keyboardType="numbers-and-punctuation"
-                  maxLength={5}
-                />
+                  onPress={() => openTimePicker(dow, "start_time")}
+                >
+                  <Text style={styles.timeInputText}>{fmt12h(windows[dow].start_time)}</Text>
+                </Pressable>
                 <Text style={styles.timeSep}>–</Text>
-                <TextInput
+                <Pressable
                   style={styles.timeInput}
-                  value={windows[dow].end_time}
-                  onChangeText={(v) => updateWindow(dow, { end_time: v })}
-                  placeholder="17:00"
-                  keyboardType="numbers-and-punctuation"
-                  maxLength={5}
-                />
+                  onPress={() => openTimePicker(dow, "end_time")}
+                >
+                  <Text style={styles.timeInputText}>{fmt12h(windows[dow].end_time)}</Text>
+                </Pressable>
               </View>
             ) : (
               <Text style={styles.dayOff}>Off</Text>
@@ -1250,6 +1641,19 @@ function AvailabilitySetupScreen({ user, onDone }: { user: User; onDone: () => v
           </View>
         ))}
       </View>
+
+      <TimePickerModal
+        visible={pickerVisible}
+        title={pickerField === "start_time" ? "Choose start time" : "Choose end time"}
+        hour={pickerHour}
+        minute={pickerMinute}
+        ampm={pickerAmPm}
+        onHourChange={setPickerHour}
+        onMinuteChange={setPickerMinute}
+        onAmPmChange={setPickerAmPm}
+        onCancel={() => setPickerVisible(false)}
+        onConfirm={savePickedTime}
+      />
 
       <Pressable
         style={[styles.primaryBtn, saving && styles.btnDisabled]}
@@ -1294,6 +1698,12 @@ function SettingsScreen({
   const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
   const [loadingPrefs, setLoadingPrefs] = useState(true);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pickerDow, setPickerDow] = useState<number | null>(null);
+  const [pickerField, setPickerField] = useState<"start_time" | "end_time">("start_time");
+  const [pickerHour, setPickerHour] = useState<number>(9);
+  const [pickerMinute, setPickerMinute] = useState<string>("00");
+  const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
 
   useEffect(() => {
     fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`)
@@ -1320,6 +1730,24 @@ function SettingsScreen({
     setWindows((prev) =>
       prev.map((w, i) => (i === dow ? { ...w, ...patch } : w))
     );
+  }
+
+  function openTimePicker(dow: number, field: "start_time" | "end_time") {
+    const current = windows[dow][field];
+    const parsed = parseTime12h(current);
+    setPickerDow(dow);
+    setPickerField(field);
+    setPickerHour(parsed.hour);
+    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerAmPm(parsed.ampm);
+    setPickerVisible(true);
+  }
+
+  function savePickedTime() {
+    if (pickerDow === null) return;
+    const next = to24hTime(pickerHour, pickerMinute, pickerAmPm);
+    updateWindow(pickerDow, { [pickerField]: next });
+    setPickerVisible(false);
   }
 
   async function savePreferences() {
@@ -1360,7 +1788,7 @@ function SettingsScreen({
         <Text style={styles.settingsLabel}>NAME</Text>
         <Text style={styles.settingsValue}>{user.display_name}</Text>
         <Text style={styles.settingsLabel}>PHONE</Text>
-        <Text style={styles.settingsValue}>{user.phone_e164}</Text>
+        <Text style={styles.settingsValue}>{formatPhoneDisplay(user.phone_e164)}</Text>
       </View>
 
       <Text style={styles.sectionTitle}>Calling Availability</Text>
@@ -1374,14 +1802,7 @@ function SettingsScreen({
       ) : (
         <View style={styles.card}>
           <Text style={styles.settingsLabel}>TIMEZONE</Text>
-          <TextInput
-            style={[styles.input, styles.timezoneInput]}
-            value={timezone}
-            onChangeText={setTimezone}
-            placeholder="e.g. America/New_York"
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+          <TimezoneDropdown value={timezone} onChange={setTimezone} />
           <Text style={styles.settingsLabel}>AVAILABLE DAYS & TIMES</Text>
           {DAYS.map((label, dow) => (
             <View key={dow} style={styles.dayRow}>
@@ -1400,23 +1821,19 @@ function SettingsScreen({
               </Pressable>
               {windows[dow].enabled ? (
                 <View style={styles.timeRange}>
-                  <TextInput
+                  <Pressable
                     style={styles.timeInput}
-                    value={windows[dow].start_time}
-                    onChangeText={(v) => updateWindow(dow, { start_time: v })}
-                    placeholder="09:00"
-                    keyboardType="numbers-and-punctuation"
-                    maxLength={5}
-                  />
+                    onPress={() => openTimePicker(dow, "start_time")}
+                  >
+                    <Text style={styles.timeInputText}>{fmt12h(windows[dow].start_time)}</Text>
+                  </Pressable>
                   <Text style={styles.timeSep}>–</Text>
-                  <TextInput
+                  <Pressable
                     style={styles.timeInput}
-                    value={windows[dow].end_time}
-                    onChangeText={(v) => updateWindow(dow, { end_time: v })}
-                    placeholder="17:00"
-                    keyboardType="numbers-and-punctuation"
-                    maxLength={5}
-                  />
+                    onPress={() => openTimePicker(dow, "end_time")}
+                  >
+                    <Text style={styles.timeInputText}>{fmt12h(windows[dow].end_time)}</Text>
+                  </Pressable>
                 </View>
               ) : (
                 <Text style={styles.dayOff}>Off</Text>
@@ -1434,6 +1851,19 @@ function SettingsScreen({
           </Pressable>
         </View>
       )}
+
+      <TimePickerModal
+        visible={pickerVisible}
+        title={pickerField === "start_time" ? "Choose start time" : "Choose end time"}
+        hour={pickerHour}
+        minute={pickerMinute}
+        ampm={pickerAmPm}
+        onHourChange={setPickerHour}
+        onMinuteChange={setPickerMinute}
+        onAmPmChange={setPickerAmPm}
+        onCancel={() => setPickerVisible(false)}
+        onConfirm={savePickedTime}
+      />
 
       <Pressable style={styles.syncBtn} onPress={onSyncContacts}>
         <Text style={styles.syncBtnText}>Add Contacts</Text>
@@ -1455,16 +1885,20 @@ function TabBar({
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
 }) {
-  const tabs: { key: Tab; label: string }[] = [
-    { key: "home", label: "Home" },
-    { key: "schedule", label: "Schedule" },
-    { key: "settings", label: "Settings" },
+  const tabs: { key: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+    { key: "home", label: "Home", icon: "home-outline" },
+    { key: "schedule", label: "Schedule", icon: "clipboard-outline" },
+    { key: "settings", label: "Settings", icon: "settings-outline" },
   ];
   return (
     <View style={styles.tabBar}>
-      {tabs.map(({ key, label }) => (
+      {tabs.map(({ key, label, icon }) => (
         <Pressable key={key} style={styles.tabItem} onPress={() => onTabChange(key)}>
-          <Text style={styles.tabIcon}>{activeTab === key ? "⬤" : "○"}</Text>
+          <Ionicons
+            name={icon}
+            size={18}
+            style={[styles.tabIcon, activeTab === key && styles.tabIconActive]}
+          />
           <Text style={[styles.tabLabel, activeTab === key && styles.tabLabelActive]}>
             {label}
           </Text>
@@ -1477,6 +1911,9 @@ function TabBar({
 // ── Styles ─────────────────────────────────────────────────────────────────
 
 const PURPLE = "#7c3aed";
+const TIME_PICKER_ROW_HEIGHT = 42;
+const TIME_PICKER_WHEEL_HEIGHT = 200;
+const TIME_PICKER_CENTER_TOP = (TIME_PICKER_WHEEL_HEIGHT - TIME_PICKER_ROW_HEIGHT) / 2;
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f6f7fb" },
@@ -1489,8 +1926,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 28,
     backgroundColor: "#f6f7fb",
   },
-  appTitle: { fontSize: 32, fontWeight: "700", color: PURPLE, marginBottom: 8 },
-  appSubtitle: { fontSize: 15, color: "#555", marginBottom: 32 },
+  appTitle: { fontSize: 32, fontWeight: "700", color: PURPLE, marginBottom: 8, textAlign: "center" },
+  appSubtitle: { fontSize: 15, color: "#555", marginBottom: 32, textAlign: "center" },
+  appSubtitleItalic: { fontStyle: "italic" },
   fieldLabel: { fontSize: 13, color: "#444", marginBottom: 4, marginTop: 16 },
   input: {
     borderWidth: 1,
@@ -1553,6 +1991,15 @@ const styles = StyleSheet.create({
   },
   callBtnText: { color: "#fff", fontWeight: "600", fontSize: 15 },
   emptyText: { color: "#aaa", fontSize: 14 },
+  homeAddContactsBtn: {
+    marginTop: 14,
+    borderWidth: 1.5,
+    borderColor: PURPLE,
+    borderRadius: 10,
+    padding: 14,
+    alignItems: "center",
+  },
+  homeAddContactsBtnText: { color: PURPLE, fontWeight: "600", fontSize: 15 },
 
   // Schedule
   scheduleRow: {
@@ -1630,6 +2077,36 @@ const styles = StyleSheet.create({
   settingsValue: { fontSize: 16, fontWeight: "500", color: "#222" },
   availHint: { fontSize: 13, color: "#888", marginBottom: 12, lineHeight: 18 },
   timezoneInput: { marginTop: 4, marginBottom: 4 },
+  timezoneWrap: { marginTop: 4, marginBottom: 4, zIndex: 50 },
+  timezoneButton: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  timezoneButtonText: { flex: 1, color: "#222", fontSize: 14 },
+  timezonePlaceholder: { flex: 1, color: "#999", fontSize: 14 },
+  timezoneChevron: { color: "#777", fontSize: 12, marginLeft: 8 },
+  timezoneMenu: {
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    marginTop: 6,
+    overflow: "hidden",
+    maxHeight: 220,
+  },
+  timezoneMenuScroll: { maxHeight: 220 },
+  timezoneOption: { paddingVertical: 10, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: "#f1f5f9" },
+  timezoneOptionActive: { backgroundColor: "#f5f3ff" },
+  timezoneOptionText: { fontSize: 13, color: "#374151" },
+  timezoneOptionTextActive: { color: PURPLE, fontWeight: "600" },
+  timezoneAutoOption: { backgroundColor: "#faf5ff" },
+  timezoneAutoOptionText: { fontSize: 13, color: PURPLE, fontWeight: "600" },
   dayRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1656,12 +2133,58 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     fontSize: 14,
-    width: 64,
+    width: 96,
     textAlign: "center",
     backgroundColor: "#fff",
   },
+  timeInputText: { fontSize: 14, color: "#222", textAlign: "center" },
+  timeField: { marginTop: 4, justifyContent: "center" },
+  timeFieldText: { fontSize: 16, color: "#222" },
   timeSep: { marginHorizontal: 8, color: "#aaa", fontSize: 14 },
   dayOff: { fontSize: 13, color: "#ccc", marginLeft: 4 },
+  timePickerBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+  },
+  timePickerCard: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 24,
+  },
+  timePickerTitle: { fontSize: 16, fontWeight: "700", color: "#222", marginBottom: 12 },
+  timePickerWheel: { position: "relative", height: TIME_PICKER_WHEEL_HEIGHT },
+  timePickerSelectionBar: {
+    position: "absolute",
+    left: 2,
+    right: 2,
+    top: TIME_PICKER_CENTER_TOP,
+    height: TIME_PICKER_ROW_HEIGHT,
+    backgroundColor: "rgba(124, 58, 237, 0.14)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(124, 58, 237, 0.35)",
+    zIndex: 1,
+  },
+  timePickerColumns: { flexDirection: "row", height: TIME_PICKER_WHEEL_HEIGHT },
+  timePickerCol: { flex: 1, height: TIME_PICKER_WHEEL_HEIGHT, marginRight: 8 },
+  timePickerColLast: { marginRight: 0 },
+  timePickerColContent: { paddingVertical: TIME_PICKER_CENTER_TOP },
+  timePickerItem: {
+    height: TIME_PICKER_ROW_HEIGHT,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    marginBottom: 0,
+    backgroundColor: "transparent",
+  },
+  timePickerItemActive: { backgroundColor: "transparent" },
+  timePickerItemText: { fontSize: 16, color: "#444" },
+  timePickerItemTextActive: { color: PURPLE, fontWeight: "700" },
+  timePickerActions: { flexDirection: "row", marginTop: 12 },
   syncBtn: {
     marginTop: 16,
     borderWidth: 1.5,
@@ -1698,7 +2221,8 @@ const styles = StyleSheet.create({
     paddingTop: 10,
   },
   tabItem: { flex: 1, alignItems: "center" },
-  tabIcon: { fontSize: 10, color: "#ccc", marginBottom: 2 },
+  tabIcon: { fontSize: 15, color: "#aaa", marginBottom: 2 },
+  tabIconActive: { color: PURPLE },
   tabLabel: { fontSize: 12, color: "#aaa" },
   tabLabelActive: { color: PURPLE, fontWeight: "600" },
 
