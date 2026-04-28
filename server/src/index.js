@@ -12,6 +12,36 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3001;
 
+// Keep dev/staging instances compatible if migrations were skipped.
+pool
+  .query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS notes TEXT`)
+  .catch((e) => console.error("schema compatibility check failed:", e));
+
+function parseScheduleInput(body = {}) {
+  const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = body;
+  if (!contactId || !recurrence || !scheduledTime) {
+    return { error: "contactId, recurrence, scheduledTime required" };
+  }
+  if (!["weekly", "biweekly", "monthly"].includes(recurrence)) {
+    return { error: "recurrence must be weekly, biweekly, or monthly" };
+  }
+  if (recurrence === "monthly" && dayOfMonth == null) {
+    return { error: "dayOfMonth required for monthly recurrence" };
+  }
+  if (["weekly", "biweekly"].includes(recurrence) && dayOfWeek == null) {
+    return { error: "dayOfWeek required for weekly/biweekly recurrence" };
+  }
+  return {
+    payload: {
+      contactId,
+      recurrence,
+      dayOfWeek: recurrence !== "monthly" ? dayOfWeek : null,
+      dayOfMonth: recurrence === "monthly" ? dayOfMonth : null,
+      scheduledTime,
+    },
+  };
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -81,11 +111,70 @@ app.get("/users/:userId/contacts", async (req, res) => {
   const { userId } = req.params;
   try {
     const r = await pool.query(
-      `SELECT id, name, phone_e164, frequency_days, last_nudged_at FROM contacts
+      `SELECT id, name, phone_e164, notes, frequency_days, last_nudged_at FROM contacts
        WHERE owner_user_id = $1 ORDER BY created_at DESC`,
       [userId]
     );
     res.json(r.rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.get("/users/:userId/contacts/:contactId", async (req, res) => {
+  const { userId, contactId } = req.params;
+  try {
+    const contactResult = await pool.query(
+      `SELECT id, name, phone_e164, notes, frequency_days, last_nudged_at
+       FROM contacts
+       WHERE id = $1 AND owner_user_id = $2`,
+      [contactId, userId]
+    );
+    const contact = contactResult.rows[0];
+    if (!contact) return res.status(404).json({ error: "contact_not_found" });
+
+    const scheduleResult = await pool.query(
+      `SELECT id, contact_id, recurrence, day_of_week, day_of_month,
+              to_char(scheduled_time, 'HH24:MI') AS scheduled_time,
+              created_at
+       FROM contact_schedules
+       WHERE user_id = $1 AND contact_id = $2
+       ORDER BY created_at`,
+      [userId, contactId]
+    );
+
+    const callHistory = contact.last_nudged_at
+      ? [{ type: "called", at: contact.last_nudged_at }]
+      : [];
+
+    res.json({
+      contact,
+      schedules: scheduleResult.rows,
+      call_history: callHistory,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.put("/users/:userId/contacts/:contactId", async (req, res) => {
+  const { userId, contactId } = req.params;
+  const { notes } = req.body ?? {};
+  if (notes != null && typeof notes !== "string") {
+    return res.status(400).json({ error: "notes must be a string or null" });
+  }
+  try {
+    const r = await pool.query(
+      `UPDATE contacts
+       SET notes = $1
+       WHERE id = $2 AND owner_user_id = $3
+       RETURNING id, name, phone_e164, notes, frequency_days, last_nudged_at`,
+      [notes ?? null, contactId, userId]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: "contact_not_found" });
+    res.json(r.rows[0]);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "db_error" });
@@ -215,27 +304,48 @@ app.get("/users/:userId/schedules", async (req, res) => {
 
 app.post("/users/:userId/schedules", async (req, res) => {
   const { userId } = req.params;
-  const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = req.body ?? {};
-  if (!contactId || !recurrence || !scheduledTime) {
-    return res.status(400).json({ error: "contactId, recurrence, scheduledTime required" });
-  }
-  if (recurrence === "monthly" && dayOfMonth == null) {
-    return res.status(400).json({ error: "dayOfMonth required for monthly recurrence" });
-  }
-  if (["weekly", "biweekly"].includes(recurrence) && dayOfWeek == null) {
-    return res.status(400).json({ error: "dayOfWeek required for weekly/biweekly recurrence" });
-  }
+  const parsed = parseScheduleInput(req.body ?? {});
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = parsed.payload;
   try {
     const r = await pool.query(
       `INSERT INTO contact_schedules (user_id, contact_id, recurrence, day_of_week, day_of_month, scheduled_time)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id`,
-      [userId, contactId, recurrence,
-       recurrence !== "monthly" ? dayOfWeek : null,
-       recurrence === "monthly" ? dayOfMonth : null,
-       scheduledTime]
+      [userId, contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime]
     );
     res.status(201).json({ id: r.rows[0].id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.put("/users/:userId/schedules/:scheduleId", async (req, res) => {
+  const { userId, scheduleId } = req.params;
+  const parsed = parseScheduleInput(req.body ?? {});
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = parsed.payload;
+  try {
+    const contact = await pool.query(
+      `SELECT id FROM contacts WHERE id = $1 AND owner_user_id = $2`,
+      [contactId, userId]
+    );
+    if (!contact.rows[0]) return res.status(404).json({ error: "contact_not_found" });
+
+    const r = await pool.query(
+      `UPDATE contact_schedules
+       SET contact_id = $1,
+           recurrence = $2,
+           day_of_week = $3,
+           day_of_month = $4,
+           scheduled_time = $5
+       WHERE id = $6 AND user_id = $7
+       RETURNING id`,
+      [contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime, scheduleId, userId]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: "schedule_not_found" });
+    res.json({ id: r.rows[0].id });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "db_error" });

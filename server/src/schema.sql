@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   owner_user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   phone_e164 TEXT NOT NULL,
+  notes TEXT,
   frequency_days INT NOT NULL DEFAULT 7 CHECK (frequency_days > 0),
   last_nudged_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
