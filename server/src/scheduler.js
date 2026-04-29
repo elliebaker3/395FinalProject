@@ -9,6 +9,52 @@ async function getDeviceTokens(userId) {
   return r.rows[0] ?? null;
 }
 
+async function inActiveAvailabilityWindow(userId, timezone) {
+  const r = await pool.query(
+    `WITH wk AS (
+       SELECT (date_trunc('day', now() AT TIME ZONE $2)::date - EXTRACT(DOW FROM now() AT TIME ZONE $2)::int) AS week_start
+     ),
+     week_slots AS (
+       SELECT 1
+       FROM user_week_availability uwa, wk
+       WHERE uwa.user_id = $1
+         AND uwa.week_start_date = wk.week_start
+     ),
+     active_week AS (
+       SELECT EXISTS(SELECT 1 FROM week_slots) AS has_week,
+              EXISTS(
+                SELECT 1
+                FROM user_week_availability uwa, wk
+                WHERE uwa.user_id = $1
+                  AND uwa.week_start_date = wk.week_start
+                  AND uwa.day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE $2)::int
+                  AND uwa.start_time <= (now() AT TIME ZONE $2)::time
+                  AND uwa.end_time > (now() AT TIME ZONE $2)::time
+              ) AS in_week
+     ),
+     active_general AS (
+       SELECT EXISTS(SELECT 1 FROM user_availability WHERE user_id = $1) AS has_general,
+              EXISTS(
+                SELECT 1 FROM user_availability
+                WHERE user_id = $1
+                  AND day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE $2)::int
+                  AND start_time <= (now() AT TIME ZONE $2)::time
+                  AND end_time > (now() AT TIME ZONE $2)::time
+              ) AS in_general
+     )
+     SELECT
+       (SELECT has_week FROM active_week) AS has_week,
+       (SELECT in_week FROM active_week) AS in_week,
+       (SELECT has_general FROM active_general) AS has_general,
+       (SELECT in_general FROM active_general) AS in_general`,
+    [userId, timezone]
+  );
+  const row = r.rows[0];
+  if (row.has_week) return row.in_week;
+  if (row.has_general) return row.in_general;
+  return true;
+}
+
 async function sendAndLog(tokens, payload, onSuccess) {
   const result = await sendNudge(
     { expoPushToken: tokens.expo_push_token, fcmToken: tokens.fcm_token },
@@ -26,19 +72,8 @@ export async function passFrequencyNudges() {
   const users = await pool.query(`SELECT id, timezone FROM users`);
 
   for (const u of users.rows) {
-    const availCheck = await pool.query(
-      `SELECT EXISTS(SELECT 1 FROM user_availability WHERE user_id = $1) AS has_windows,
-              EXISTS(
-                SELECT 1 FROM user_availability
-                WHERE user_id = $1
-                  AND day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE $2)::int
-                  AND start_time <= (now() AT TIME ZONE $2)::time
-                  AND end_time   >  (now() AT TIME ZONE $2)::time
-              ) AS in_window`,
-      [u.id, u.timezone]
-    );
-    const { has_windows, in_window } = availCheck.rows[0];
-    if (has_windows && !in_window) {
+    const inWindow = await inActiveAvailabilityWindow(u.id, u.timezone);
+    if (!inWindow) {
       console.log(`frequency pass: skipping user ${u.id} — outside availability window`);
       continue;
     }
@@ -53,15 +88,16 @@ export async function passFrequencyNudges() {
            OR c.last_notified_at <= now() - COALESCE(c.frequency_days, 7) * interval '1 day'
          )
                   AND (
-                             cu.id IS NULL
-                                        OR EXISTS (
-                                                     SELECT 1 FROM user_availability
-                                                                  WHERE user_id = cu.id
-                                                                                 AND day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE cu.timezone)::int
-                                                                                                AND start_time <= (now() AT TIME ZONE cu.timezone)::time
-                                                                                                               AND end_time   >  (now() AT TIME ZONE cu.timezone)::time
-                                                                                                                          )
-                                                                                                                                   )
+                    cu.id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM user_availability ua
+                      WHERE ua.user_id = cu.id
+                        AND ua.day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE cu.timezone)::int
+                        AND ua.start_time <= (now() AT TIME ZONE cu.timezone)::time
+                        AND ua.end_time > (now() AT TIME ZONE cu.timezone)::time
+                    )
+                  )
        ORDER BY c.last_notified_at NULLS FIRST
        LIMIT 1`,
       [u.id]
@@ -110,6 +146,9 @@ export async function passScheduledCalls() {
   `);
 
   for (const row of due.rows) {
+    const inWindow = await inActiveAvailabilityWindow(row.user_id, row.timezone);
+    if (!inWindow) continue;
+
     const tokens = await getDeviceTokens(row.user_id);
     if (!tokens?.expo_push_token && !tokens?.fcm_token) continue;
 

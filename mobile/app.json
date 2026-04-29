@@ -2,6 +2,7 @@
   "expo": {
     "name": "CallWizard",
     "slug": "callwizard",
+    "originalFullName": "@efbaker",
     "version": "0.1.0",
     "orientation": "portrait",
     "scheme": "callwizard",
@@ -25,10 +26,13 @@
         {
           "sounds": []
         }
-      ]
+      ],
+      "expo-web-browser",
+      "expo-secure-store"
     ],
     "extra": {
       "apiBaseUrl": "https://callwizard-api.onrender.com",
+      "expoAuthProxyRedirect": "https://auth.expo.io/@efbaker/callwizard",
       "eas": {
         "projectId": "e0f0012c-98c0-4807-adcd-5f31a952ecfa"
       }

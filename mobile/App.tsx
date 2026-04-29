@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  InteractionManager,
   Keyboard,
   Linking,
   Modal,
@@ -13,13 +14,64 @@ import {
   Text,
   TextInput,
   View,
+  type StyleProp,
+  type TextStyle,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  fetchAvailabilityWindowsFromCalendar,
+  fetchThisWeekSlotsFromCalendar,
+  runScheduleConflictCheck,
+  runSuggestFreeTimes,
+} from "./googleCalendarAvailability";
+import { getGoogleOAuthSetupHint, isExpoGoRuntime } from "./googleCalendarConfig";
+import { getValidAccessToken, hasGoogleCalendarSession } from "./googleCalendarTokens";
+import { useGoogleCalendarAuth } from "./useGoogleCalendarAuth";
 import Constants from "expo-constants";
+import { Limelight_400Regular } from "@expo-google-fonts/limelight";
 import * as Contacts from "expo-contacts";
+import { presentAccessPickerAsync } from "expo-contacts";
+import { useFonts } from "expo-font";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
+
+const BTN_LABEL_MIN_SCALE = 0.62;
+
+function iosMajorVersion(): number {
+  if (Platform.OS !== "ios") return 0;
+  const v = Platform.Version;
+  if (typeof v === "number") return Math.floor(v);
+  const major = parseInt(String(v).split(".")[0] ?? "0", 10);
+  return Number.isFinite(major) ? major : 0;
+}
+
+function alertLimitedContactsFromSettings(message: string) {
+  Alert.alert("Add more contacts", message, [
+    { text: "Open Settings", onPress: () => void Linking.openSettings() },
+    { text: "OK", style: "cancel" },
+  ]);
+}
+
+/** Keeps control labels on one line by shrinking font when space is tight. */
+function ButtonLabel({
+  style,
+  children,
+}: {
+  style?: StyleProp<TextStyle>;
+  children: React.ReactNode;
+}) {
+  return (
+    <Text
+      style={[styles.btnLabelShrink, style]}
+      numberOfLines={1}
+      adjustsFontSizeToFit
+      minimumFontScale={BTN_LABEL_MIN_SCALE}
+    >
+      {children}
+    </Text>
+  );
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -189,6 +241,9 @@ async function registerPushToken(userId: string) {
 // ── Root ───────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [fontsLoaded] = useFonts({
+    Limelight_400Regular,
+  });
   const [screen, setScreen] = useState<Screen>("loading");
   const [user, setUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("home");
@@ -286,6 +341,15 @@ export default function App() {
     setScreen("login");
   }
 
+  if (!fontsLoaded) {
+    return (
+      <View style={styles.center}>
+        <StatusBar style="dark" />
+        <ActivityIndicator size="large" color={PURPLE} />
+      </View>
+    );
+  }
+
   if (screen === "loading") {
     return (
       <View style={styles.center}>
@@ -320,31 +384,52 @@ export default function App() {
   return (
     <View style={styles.root}>
       <StatusBar style="dark" />
-      {activeTab === "home" && user && (
-        <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
-      )}
-      {activeTab === "schedule" && user && <ScheduleScreen user={user} />}
-      {activeTab === "settings" && user && (
-        <SettingsScreen
-          user={user}
-          initialTimezone={persistedTimezone}
-          onTimezoneChange={updatePersistedTimezone}
-          onLogout={handleLogout}
-          onSyncContacts={() => showContactSelect(() => {})}
-        />
-      )}
+      {user ? (
+        <View style={[styles.tabScreen, activeTab !== "home" && styles.tabScreenHidden]}>
+          <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
+        </View>
+      ) : null}
+      {user ? (
+        <View style={[styles.tabScreen, activeTab !== "schedule" && styles.tabScreenHidden]}>
+          <ScheduleScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
+        </View>
+      ) : null}
+      {user ? (
+        <View style={[styles.tabScreen, activeTab !== "settings" && styles.tabScreenHidden]}>
+          <SettingsScreen
+            user={user}
+            initialTimezone={persistedTimezone}
+            onTimezoneChange={updatePersistedTimezone}
+            onLogout={handleLogout}
+            onSyncContacts={() => showContactSelect(() => {})}
+          />
+        </View>
+      ) : null}
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
-      {contactSelectVisible && user && (
-        <ContactSelectScreen
-          userId={user.id}
-          onDone={hideContactSelect}
-          onCancel={() => {
-            setContactSelectVisible(false);
-            contactSelectCallback?.();
-            setContactSelectCallback(null);
-          }}
-        />
-      )}
+      <Modal
+        visible={!!user && contactSelectVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => {
+          setContactSelectVisible(false);
+          contactSelectCallback?.();
+          setContactSelectCallback(null);
+        }}
+      >
+        {user && contactSelectVisible ? (
+          <View style={{ flex: 1 }}>
+            <ContactSelectScreen
+              userId={user.id}
+              onDone={hideContactSelect}
+              onCancel={() => {
+                setContactSelectVisible(false);
+                contactSelectCallback?.();
+                setContactSelectCallback(null);
+              }}
+            />
+          </View>
+        ) : null}
+      </Modal>
     </View>
   );
 }
@@ -370,16 +455,41 @@ function ContactSelectScreen({
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [reloadingContacts, setReloadingContacts] = useState(false);
   const [permDenied, setPermDenied] = useState(false);
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualPhone, setManualPhone] = useState("");
   const [addingManual, setAddingManual] = useState(false);
+  const [totalAdded, setTotalAdded] = useState(0);
 
-  useEffect(() => {
-    (async () => {
-      const { status } = await Contacts.requestPermissionsAsync();
-      if (status !== "granted") { setPermDenied(true); setLoading(false); return; }
+  function handleClose() {
+    if (totalAdded > 0) onDone(totalAdded);
+    else onCancel();
+  }
+
+  async function loadPhoneContacts(showSpinner = false) {
+    console.log("[CONTACT_SYNC] loadPhoneContacts:start", { showSpinner, permDenied, allContactsCount: allContacts.length });
+    // #region agent log
+    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H2',location:'mobile/App.tsx:388',message:'loadPhoneContacts called',data:{showSpinner,permDenied,allContactsCount:allContacts.length},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    if (showSpinner) setReloadingContacts(true);
+    try {
+      const perm = await Contacts.requestPermissionsAsync();
+      const { status } = perm;
+      console.log("[CONTACT_SYNC] loadPhoneContacts:permission", {
+        status,
+        accessPrivileges: (perm as { accessPrivileges?: string }).accessPrivileges ?? null,
+        canAskAgain: (perm as { canAskAgain?: boolean }).canAskAgain ?? null,
+      });
+      // #region agent log
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H5',location:'mobile/App.tsx:391',message:'contacts permission status',data:{status,accessPrivileges:(perm as { accessPrivileges?: string }).accessPrivileges ?? null,canAskAgain:(perm as { canAskAgain?: boolean }).canAskAgain ?? null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      if (status !== "granted") {
+        setPermDenied(true);
+        return;
+      }
+      setPermDenied(false);
       const { data } = await Contacts.getContactsAsync({
         fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
       });
@@ -391,9 +501,21 @@ function ContactSelectScreen({
         }))
         .filter((c) => c.phoneE164.length >= 8)
         .sort((a, b) => a.name.localeCompare(b.name));
+      console.log("[CONTACT_SYNC] loadPhoneContacts:loaded", { rawCount: data.length, normalizedCount: normalized.length });
+      // #region agent log
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H3',location:'mobile/App.tsx:400',message:'contacts loaded from phone',data:{normalizedCount:normalized.length,sample:normalized.slice(0,3).map((c)=>c.phoneE164)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       setAllContacts(normalized);
+      setSearch("");
+      setSelected(new Set());
+    } finally {
+      if (showSpinner) setReloadingContacts(false);
       setLoading(false);
-    })();
+    }
+  }
+
+  useEffect(() => {
+    loadPhoneContacts(false);
   }, []);
 
   const filtered = allContacts.filter((c) =>
@@ -416,7 +538,64 @@ function ContactSelectScreen({
     setSelected(new Set());
   }
 
+  async function syncMoreFromPhone() {
+    if (reloadingContacts) return;
+    setReloadingContacts(true);
+    try {
+      const perm = await Contacts.requestPermissionsAsync();
+      if (perm.status !== "granted") {
+        setPermDenied(true);
+        Alert.alert(
+          "Contacts permission needed",
+          "Allow contacts access to pick and sync more contacts from your phone."
+        );
+        return;
+      }
+      setPermDenied(false);
+
+      const accessPrivileges =
+        (perm as { accessPrivileges?: "all" | "limited" | "none" }).accessPrivileges ?? "all";
+
+      // iOS limited library: Apple’s access picker (iOS 18+) must run on the main VC after layout.
+      // Calling too early often throws MissingCurrentViewControllerException in Expo.
+      if (Platform.OS === "ios" && accessPrivileges === "limited") {
+        const major = iosMajorVersion();
+        if (major >= 18) {
+          await new Promise<void>((resolve) => {
+            InteractionManager.runAfterInteractions(() => resolve());
+          });
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          await new Promise<void>((resolve) => setTimeout(resolve, 80));
+
+          try {
+            await presentAccessPickerAsync();
+          } catch (e) {
+            console.warn("[CONTACT_SYNC] presentAccessPickerAsync", e);
+            alertLimitedContactsFromSettings(
+              "The contact picker couldn’t open from this screen. Go to Settings → Privacy & Security → Contacts → this app to add more people, then return here."
+            );
+          }
+        } else {
+          alertLimitedContactsFromSettings(
+            "Choosing additional contacts uses a feature that requires iOS 18 or newer. You can still change access in Settings → Privacy & Security → Contacts → this app."
+          );
+        }
+      }
+
+      await loadPhoneContacts(false);
+    } catch (e) {
+      console.warn("[CONTACT_SYNC] syncMoreFromPhone", e);
+      Alert.alert("Could not load contacts", "Please try again.");
+    } finally {
+      setReloadingContacts(false);
+    }
+  }
+
   async function syncSelected() {
+    console.log("[CONTACT_SYNC] syncSelected:start", { selectedCount: selected.size, totalAdded });
+    // #region agent log
+    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H4',location:'mobile/App.tsx:441',message:'syncSelected invoked',data:{selectedCount:selected.size,totalAdded},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (selected.size === 0) { Alert.alert("Select at least one contact."); return; }
     setSyncing(true);
     try {
@@ -431,9 +610,17 @@ function ContactSelectScreen({
       );
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const result = await res.json();
-      onDone(result.added as number);
+      const addedNow = Number(result.added ?? 0);
+      console.log("[CONTACT_SYNC] syncSelected:result", { addedNow, responseAdded: result.added });
+      // #region agent log
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H4',location:'mobile/App.tsx:456',message:'syncSelected result',data:{addedNow,responseAdded:result.added,totalAddedBefore:totalAdded},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      setTotalAdded((prev) => prev + addedNow);
+      setSelected(new Set());
+      Alert.alert("Contacts synced", `${addedNow} new contact${addedNow !== 1 ? "s" : ""} added.`);
     } catch {
       Alert.alert("Sync failed", "Could not sync contacts. Please try again.");
+    } finally {
       setSyncing(false);
     }
   }
@@ -469,7 +656,7 @@ function ContactSelectScreen({
       <StatusBar style="dark" />
       <View style={styles.overlayHeader}>
         <Text style={styles.overlayTitle}>Select Contacts to Sync</Text>
-        <Pressable onPress={onCancel}>
+        <Pressable onPress={handleClose}>
           <Text style={styles.overlayClose}>✕</Text>
         </Pressable>
       </View>
@@ -481,14 +668,23 @@ function ContactSelectScreen({
           <Text style={[styles.emptyText, { marginBottom: 20 }]}>
             Contacts permission denied. Enable it in your phone Settings to browse phone contacts.
           </Text>
+          <Pressable
+            style={[styles.outlineBtn, { marginBottom: 10 }]}
+            onPress={syncMoreFromPhone}
+            disabled={reloadingContacts}
+          >
+            <ButtonLabel style={styles.outlineBtnText}>
+              {reloadingContacts ? "Opening phone contacts..." : "Sync more contacts from phone"}
+            </ButtonLabel>
+          </Pressable>
           <Text style={styles.sectionTitle}>Add contact manually</Text>
           <Pressable
             style={styles.manualAddToggle}
             onPress={() => setShowManualAdd((v) => !v)}
           >
-            <Text style={styles.manualAddToggleText}>
+            <ButtonLabel style={styles.manualAddToggleText}>
               {showManualAdd ? "− Cancel" : "+ Add contact manually"}
-            </Text>
+            </ButtonLabel>
           </Pressable>
           {showManualAdd && (
             <View style={styles.manualAddForm}>
@@ -512,14 +708,14 @@ function ContactSelectScreen({
                 onPress={addManualContact}
                 disabled={addingManual}
               >
-                <Text style={styles.primaryBtnText}>
+                <ButtonLabel style={styles.primaryBtnText}>
                   {addingManual ? "Adding…" : "Add Contact"}
-                </Text>
+                </ButtonLabel>
               </Pressable>
             </View>
           )}
-          <Pressable style={[styles.outlineBtn, { marginTop: 20 }]} onPress={onCancel}>
-            <Text style={styles.outlineBtnText}>Close</Text>
+          <Pressable style={[styles.outlineBtn, { marginTop: 20 }]} onPress={handleClose}>
+            <ButtonLabel style={styles.outlineBtnText}>{totalAdded > 0 ? "Done" : "Close"}</ButtonLabel>
           </Pressable>
         </ScrollView>
       ) : (
@@ -530,19 +726,29 @@ function ContactSelectScreen({
               value={search}
               onChangeText={setSearch}
               placeholder="Search by name…"
+              placeholderTextColor={CONTACT_SEARCH_PLACEHOLDER}
               autoCapitalize="none"
               clearButtonMode="while-editing"
             />
+            <Pressable
+              style={[styles.outlineBtn, { marginTop: 10, marginBottom: 6 }]}
+              onPress={syncMoreFromPhone}
+              disabled={reloadingContacts}
+            >
+              <ButtonLabel style={styles.outlineBtnText}>
+                {reloadingContacts ? "Opening phone contacts..." : "Sync more contacts from phone"}
+              </ButtonLabel>
+            </Pressable>
             <View style={styles.selectAllRow}>
               <Text style={styles.selectedCount}>
                 {selected.size} of {allContacts.length} selected
               </Text>
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <Pressable onPress={selectAll}>
-                  <Text style={styles.selectAllBtn}>All</Text>
+                  <ButtonLabel style={styles.selectAllBtn}>All</ButtonLabel>
                 </Pressable>
                 <Pressable onPress={deselectAll}>
-                  <Text style={styles.selectAllBtn}>None</Text>
+                  <ButtonLabel style={styles.selectAllBtn}>None</ButtonLabel>
                 </Pressable>
               </View>
             </View>
@@ -577,9 +783,9 @@ function ContactSelectScreen({
               style={styles.manualAddToggle}
               onPress={() => setShowManualAdd((v) => !v)}
             >
-              <Text style={styles.manualAddToggleText}>
+              <ButtonLabel style={styles.manualAddToggleText}>
                 {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
-              </Text>
+              </ButtonLabel>
             </Pressable>
             {showManualAdd && (
               <View style={styles.manualAddForm}>
@@ -603,9 +809,9 @@ function ContactSelectScreen({
                   onPress={addManualContact}
                   disabled={addingManual}
                 >
-                  <Text style={styles.primaryBtnText}>
+                  <ButtonLabel style={styles.primaryBtnText}>
                     {addingManual ? "Adding…" : "Add Contact"}
-                  </Text>
+                  </ButtonLabel>
                 </Pressable>
               </View>
             )}
@@ -624,18 +830,20 @@ function ContactSelectScreen({
                   borderColor: PURPLE,
                 },
               ]}
-              onPress={onCancel}
+              onPress={handleClose}
             >
-              <Text style={[styles.primaryBtnText, { color: PURPLE }]}>Cancel</Text>
+              <ButtonLabel style={[styles.primaryBtnText, { color: PURPLE }]}>
+                {totalAdded > 0 ? "Done" : "Cancel"}
+              </ButtonLabel>
             </Pressable>
             <Pressable
               style={[styles.primaryBtn, { flex: 1, marginTop: 0 }, syncing && styles.btnDisabled]}
               onPress={syncSelected}
               disabled={syncing}
             >
-              <Text style={styles.primaryBtnText}>
+              <ButtonLabel style={styles.primaryBtnText}>
                 {syncing ? "Syncing…" : `Add ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
-              </Text>
+              </ButtonLabel>
             </Pressable>
           </View>
         </>
@@ -702,10 +910,15 @@ function LoginScreen({
         onPress={submit}
         disabled={loading}
       >
-        <Text style={styles.primaryBtnText}>{loading ? "Logging in…" : "Log In"}</Text>
+        <ButtonLabel style={styles.primaryBtnText}>{loading ? "Logging in…" : "Log In"}</ButtonLabel>
       </Pressable>
       <Pressable onPress={onSignUp} style={styles.linkWrapper}>
-        <Text style={styles.linkText}>
+        <Text
+          style={styles.linkText}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={BTN_LABEL_MIN_SCALE}
+        >
           Don't have an account?{" "}
           <Text style={styles.linkBold}>Sign Up</Text>
         </Text>
@@ -770,10 +983,15 @@ function SignUpScreen({
         onPress={submit}
         disabled={loading}
       >
-        <Text style={styles.primaryBtnText}>{loading ? "Creating account…" : "Sign Up"}</Text>
+        <ButtonLabel style={styles.primaryBtnText}>{loading ? "Creating account…" : "Sign Up"}</ButtonLabel>
       </Pressable>
       <Pressable onPress={onBack} style={styles.linkWrapper}>
-        <Text style={styles.linkText}>
+        <Text
+          style={styles.linkText}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={BTN_LABEL_MIN_SCALE}
+        >
           Already have an account?{" "}
           <Text style={styles.linkBold}>Log In</Text>
         </Text>
@@ -897,7 +1115,7 @@ function ContactCard({
       <Text style={styles.cardName}>{contact.name}</Text>
       <Text style={styles.cardPhone}>{formatPhoneDisplay(contact.phone_e164)}</Text>
       <Pressable style={styles.callBtn} onPress={() => onCall(contact.id, contact.phone_e164)}>
-        <Text style={styles.callBtnText}>Call {callLabel}</Text>
+        <ButtonLabel style={styles.callBtnText}>{callLabel}</ButtonLabel>
       </Pressable>
     </View>
   );
@@ -918,7 +1136,7 @@ function AddContactsPromptCard({ onSyncContacts }: { onSyncContacts: () => void 
         Add contacts to start getting personalized reach-out suggestions.
       </Text>
       <Pressable style={styles.homeAddContactsBtn} onPress={onSyncContacts}>
-        <Text style={styles.homeAddContactsBtnText}>Add Contacts</Text>
+        <ButtonLabel style={styles.homeAddContactsBtnText}>Add Contacts</ButtonLabel>
       </Pressable>
     </View>
   );
@@ -1031,9 +1249,14 @@ function TimezoneDropdown({
   return (
     <View style={styles.timezoneWrap}>
       <Pressable style={styles.timezoneButton} onPress={() => setOpen((v) => !v)}>
-        <Text style={value ? styles.timezoneButtonText : styles.timezonePlaceholder}>
+        <ButtonLabel
+          style={[
+            value ? styles.timezoneButtonText : styles.timezonePlaceholder,
+            { textAlign: "left" },
+          ]}
+        >
           {selectedLabel}
-        </Text>
+        </ButtonLabel>
         <Text style={styles.timezoneChevron}>{open ? "▴" : "▾"}</Text>
       </Pressable>
       {open && (
@@ -1046,7 +1269,9 @@ function TimezoneDropdown({
                 setOpen(false);
               }}
             >
-              <Text style={styles.timezoneAutoOptionText}>{deviceLabel}</Text>
+              <ButtonLabel style={[styles.timezoneAutoOptionText, { textAlign: "left" }]}>
+                {deviceLabel}
+              </ButtonLabel>
             </Pressable>
             {TIMEZONE_OPTIONS.map((tz) => (
               <Pressable
@@ -1057,14 +1282,15 @@ function TimezoneDropdown({
                   setOpen(false);
                 }}
               >
-                <Text
+                <ButtonLabel
                   style={[
                     styles.timezoneOptionText,
                     value === tz.value && styles.timezoneOptionTextActive,
+                    { textAlign: "left" },
                   ]}
                 >
                   {tz.label}
-                </Text>
+                </ButtonLabel>
               </Pressable>
             ))}
           </ScrollView>
@@ -1219,10 +1445,10 @@ function TimePickerModal({
           </View>
           <View style={styles.timePickerActions}>
             <Pressable style={[styles.outlineBtn, { flex: 1, marginRight: 8 }]} onPress={onCancel}>
-              <Text style={styles.outlineBtnText}>Cancel</Text>
+              <ButtonLabel style={styles.outlineBtnText}>Cancel</ButtonLabel>
             </Pressable>
             <Pressable style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onConfirm}>
-              <Text style={styles.primaryBtnText}>Set Time</Text>
+              <ButtonLabel style={styles.primaryBtnText}>Set Time</ButtonLabel>
             </Pressable>
           </View>
         </View>
@@ -1239,7 +1465,13 @@ function scheduleLabel(s: CallSchedule): string {
   return `${freq} · ${day} · ${time}`;
 }
 
-function ScheduleScreen({ user }: { user: User }) {
+function ScheduleScreen({
+  user,
+  onSyncContacts,
+}: {
+  user: User;
+  onSyncContacts: () => void;
+}) {
   const [schedules, setSchedules] = useState<CallSchedule[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1272,6 +1504,11 @@ function ScheduleScreen({ user }: { user: User }) {
   const [pickerMinute, setPickerMinute] = useState<string>("00");
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("PM");
 
+  const [prefsTimezone, setPrefsTimezone] = useState("UTC");
+  const [calendarConflict, setCalendarConflict] = useState(false);
+  const [calendarCheckPending, setCalendarCheckPending] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+
   async function refreshSchedulesAndContacts() {
     const [s, c] = await Promise.all([
       fetchWithTimeout(`${getApiBase()}/users/${user.id}/schedules`).then((r) => r.json()),
@@ -1303,6 +1540,98 @@ function ScheduleScreen({ user }: { user: User }) {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [user.id]);
+
+  useEffect(() => {
+    fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`)
+      .then((r) => r.json())
+      .then((d: { timezone?: string }) => {
+        if (d?.timezone) setPrefsTimezone(d.timezone);
+      })
+      .catch(() => {});
+  }, [user.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        if (!showForm) {
+          if (!cancelled) setCalendarConflict(false);
+          return;
+        }
+        const hasSession = await hasGoogleCalendarSession();
+        if (!hasSession) {
+          if (!cancelled) {
+            setCalendarConflict(false);
+            setCalendarCheckPending(false);
+          }
+          return;
+        }
+        const token = await getValidAccessToken();
+        if (!token || cancelled) {
+          if (!cancelled) setCalendarCheckPending(false);
+          return;
+        }
+        if (!cancelled) setCalendarCheckPending(true);
+        try {
+          const dom = parseInt(dayOfMonth, 10) || 1;
+          const conflict = await runScheduleConflictCheck({
+            accessToken: token,
+            timezone: prefsTimezone,
+            recurrence: recurrence,
+            dayOfWeek,
+            dayOfMonth: dom,
+            schedTime,
+          });
+          if (!cancelled) setCalendarConflict(conflict);
+        } catch {
+          if (!cancelled) setCalendarConflict(false);
+        } finally {
+          if (!cancelled) setCalendarCheckPending(false);
+        }
+      })();
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [showForm, prefsTimezone, recurrence, dayOfWeek, dayOfMonth, schedTime]);
+
+  async function suggestFreeTimeFromCalendar() {
+    const token = await getValidAccessToken();
+    if (!token) {
+      Alert.alert("Connect Google", "Connect Google Calendar in Settings first.");
+      return;
+    }
+    if (recurrence === "monthly") {
+      Alert.alert(
+        "Day of week",
+        "Free-time suggestions use a day of the week. Switch to weekly or biweekly, or pick a time manually."
+      );
+      return;
+    }
+    setSuggestLoading(true);
+    try {
+      const times = await runSuggestFreeTimes({
+        accessToken: token,
+        timezone: prefsTimezone,
+        targetDayOfWeek: dayOfWeek,
+        schedTime,
+      });
+      if (times.length === 0) {
+        Alert.alert(
+          "No free slot",
+          "No free 30-minute slot found in the next 8 weeks between 7:00 and 22:00."
+        );
+      } else {
+        setSchedTime(times[0]!);
+        Alert.alert("Suggested time", `Set to ${fmt12h(times[0]!)}. You can adjust with the time picker.`);
+      }
+    } catch (e: unknown) {
+      Alert.alert("Calendar", e instanceof Error ? e.message : "Could not read calendar.");
+    } finally {
+      setSuggestLoading(false);
+    }
+  }
 
   function resetScheduleForm() {
     setRecurrence("weekly");
@@ -1511,7 +1840,7 @@ function ScheduleScreen({ user }: { user: User }) {
             setEditingScheduleId(null);
           }}
         >
-          <Text style={styles.outlineBtnText}>Back to all schedules</Text>
+          <ButtonLabel style={styles.outlineBtnText}>Back to all schedules</ButtonLabel>
         </Pressable>
       ) : null}
 
@@ -1584,7 +1913,7 @@ function ScheduleScreen({ user }: { user: User }) {
                     style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
                     onPress={() => startEditSchedule(s)}
                   >
-                    <Text style={styles.outlineBtnText}>Edit</Text>
+                    <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
                   </Pressable>
                   <Pressable
                     style={styles.deleteBtn}
@@ -1617,7 +1946,7 @@ function ScheduleScreen({ user }: { user: User }) {
               style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
               onPress={() => openContactDetail(s.contact_id)}
             >
-              <Text style={styles.outlineBtnText}>Edit</Text>
+              <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
             </Pressable>
             <Pressable
               style={styles.deleteBtn}
@@ -1644,7 +1973,9 @@ function ScheduleScreen({ user }: { user: User }) {
           <Text style={styles.settingsLabel}>CONTACT</Text>
           {activeContactId ? (
             <View style={styles.pickerBtn}>
-              <Text style={styles.pickerBtnText}>{selectedContact?.name ?? "Selected contact"}</Text>
+              <ButtonLabel style={[styles.pickerBtnText, { textAlign: "left" }]}>
+                {selectedContact?.name ?? "Selected contact"}
+              </ButtonLabel>
             </View>
           ) : (
             <>
@@ -1652,9 +1983,14 @@ function ScheduleScreen({ user }: { user: User }) {
                 style={styles.pickerBtn}
                 onPress={() => setShowContactList((v) => !v)}
               >
-                <Text style={selectedContact ? styles.pickerBtnText : styles.pickerBtnPlaceholder}>
+                <ButtonLabel
+                  style={[
+                    selectedContact ? styles.pickerBtnText : styles.pickerBtnPlaceholder,
+                    { textAlign: "left" },
+                  ]}
+                >
                   {selectedContact ? selectedContact.name : "Select a contact…"}
-                </Text>
+                </ButtonLabel>
               </Pressable>
               {showContactList && (
                 <View style={styles.contactList}>
@@ -1663,6 +1999,7 @@ function ScheduleScreen({ user }: { user: User }) {
                     value={contactSearch}
                     onChangeText={setContactSearch}
                     placeholder="Search by name…"
+                    placeholderTextColor={CONTACT_SEARCH_PLACEHOLDER}
                     autoCapitalize="none"
                     clearButtonMode="while-editing"
                   />
@@ -1686,11 +2023,20 @@ function ScheduleScreen({ user }: { user: User }) {
                     ))}
                   <Pressable
                     style={styles.manualAddToggle}
+                    onPress={() => {
+                      setShowContactList(false);
+                      onSyncContacts();
+                    }}
+                  >
+                    <ButtonLabel style={styles.manualAddToggleText}>+ Sync more contacts from phone</ButtonLabel>
+                  </Pressable>
+                  <Pressable
+                    style={styles.manualAddToggle}
                     onPress={() => setShowManualAdd((v) => !v)}
                   >
-                    <Text style={styles.manualAddToggleText}>
+                    <ButtonLabel style={styles.manualAddToggleText}>
                       {showManualAdd ? "− Cancel manual add" : "+ Add contact manually"}
-                    </Text>
+                    </ButtonLabel>
                   </Pressable>
                   {showManualAdd && (
                     <View style={styles.manualAddForm}>
@@ -1714,9 +2060,9 @@ function ScheduleScreen({ user }: { user: User }) {
                         onPress={addManualContact}
                         disabled={addingManual}
                       >
-                        <Text style={styles.primaryBtnText}>
+                        <ButtonLabel style={styles.primaryBtnText}>
                           {addingManual ? "Adding…" : "Add Contact"}
-                        </Text>
+                        </ButtonLabel>
                       </Pressable>
                     </View>
                   )}
@@ -1734,9 +2080,9 @@ function ScheduleScreen({ user }: { user: User }) {
                 style={[styles.segmentBtn, recurrence === r && styles.segmentBtnActive]}
                 onPress={() => setRecurrence(r)}
               >
-                <Text style={[styles.segmentBtnText, recurrence === r && styles.segmentBtnTextActive]}>
+                <ButtonLabel style={[styles.segmentBtnText, recurrence === r && styles.segmentBtnTextActive]}>
                   {RECURRENCE_LABELS[r]}
-                </Text>
+                </ButtonLabel>
               </Pressable>
             ))}
           </View>
@@ -1752,9 +2098,9 @@ function ScheduleScreen({ user }: { user: User }) {
                     style={[styles.dayChip, dayOfWeek === i && styles.dayChipActive]}
                     onPress={() => setDayOfWeek(i)}
                   >
-                    <Text style={[styles.dayChipText, dayOfWeek === i && styles.dayChipTextActive]}>
+                    <ButtonLabel style={[styles.dayChipText, dayOfWeek === i && styles.dayChipTextActive]}>
                       {label}
-                    </Text>
+                    </ButtonLabel>
                   </Pressable>
                 ))}
               </View>
@@ -1779,6 +2125,24 @@ function ScheduleScreen({ user }: { user: User }) {
             <Text style={styles.timeFieldText}>{fmt12h(schedTime)}</Text>
           </Pressable>
 
+          {calendarCheckPending ? (
+            <Text style={styles.calendarHint}>Checking Google Calendar…</Text>
+          ) : calendarConflict ? (
+            <Text style={styles.calendarWarning}>
+              This time overlaps a calendar event on at least one of the next upcoming occurrences.
+            </Text>
+          ) : null}
+
+          <Pressable
+            style={[styles.outlineBtn, { marginTop: 10 }, suggestLoading && styles.btnDisabled]}
+            onPress={() => void suggestFreeTimeFromCalendar()}
+            disabled={suggestLoading}
+          >
+            <ButtonLabel style={styles.outlineBtnText}>
+              {suggestLoading ? "Suggesting…" : "Suggest a free time (Google Calendar)"}
+            </ButtonLabel>
+          </Pressable>
+
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             <Pressable
               style={[styles.outlineBtn, { flex: 1, marginRight: 8 }]}
@@ -1787,16 +2151,16 @@ function ScheduleScreen({ user }: { user: User }) {
                 setEditingScheduleId(null);
               }}
             >
-              <Text style={styles.outlineBtnText}>Cancel</Text>
+              <ButtonLabel style={styles.outlineBtnText}>Cancel</ButtonLabel>
             </Pressable>
             <Pressable
               style={[styles.primaryBtn, { flex: 1, marginTop: 0 }, saving && styles.btnDisabled]}
               onPress={submitSchedule}
               disabled={saving}
             >
-              <Text style={styles.primaryBtnText}>
+              <ButtonLabel style={styles.primaryBtnText}>
                 {saving ? "Saving…" : editingScheduleId ? "Save Changes" : "Add Schedule"}
-              </Text>
+              </ButtonLabel>
             </Pressable>
           </View>
         </View>
@@ -1812,7 +2176,7 @@ function ScheduleScreen({ user }: { user: User }) {
             }
           }}
         >
-          <Text style={styles.primaryBtnText}>+ Add Scheduled Call</Text>
+          <ButtonLabel style={styles.primaryBtnText}>+ Add Scheduled Call</ButtonLabel>
         </Pressable>
       )}
 
@@ -1846,11 +2210,10 @@ function AvailabilitySetupScreen({
   onDone: () => void;
 }) {
   const [timezone, setTimezone] = useState(initialTimezone || "UTC");
-  const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
+  const [windows, setWindows] = useState<DaySlots[]>(DEFAULT_WINDOWS);
   const [saving, setSaving] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
-  const [pickerDow, setPickerDow] = useState<number | null>(null);
-  const [pickerField, setPickerField] = useState<"start_time" | "end_time">("start_time");
+  const [pickerTarget, setPickerTarget] = useState<TimePickerTarget | null>(null);
   const [pickerHour, setPickerHour] = useState<number>(9);
   const [pickerMinute, setPickerMinute] = useState<string>("00");
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
@@ -1859,15 +2222,20 @@ function AvailabilitySetupScreen({
     if (initialTimezone) setTimezone(initialTimezone);
   }, [initialTimezone]);
 
-  function updateWindow(dow: number, patch: Partial<DayWindow>) {
-    setWindows((prev) => prev.map((w, i) => (i === dow ? { ...w, ...patch } : w)));
+  function updateWindow(dow: number, slotIdx: number, field: "start_time" | "end_time", value: string) {
+    setWindows((prev) =>
+      prev.map((day, i) => {
+        if (i !== dow) return day;
+        const slots = day.slots.map((slot, idx) => (idx === slotIdx ? { ...slot, [field]: value } : slot));
+        return normalizeDaySlots({ enabled: day.enabled, slots });
+      })
+    );
   }
 
-  function openTimePicker(dow: number, field: "start_time" | "end_time") {
-    const current = windows[dow][field];
+  function openTimePicker(dow: number, slotIdx: number, field: "start_time" | "end_time") {
+    const current = windows[dow]?.slots?.[slotIdx]?.[field] ?? "09:00";
     const parsed = parseTime12h(current);
-    setPickerDow(dow);
-    setPickerField(field);
+    setPickerTarget({ dow, slotIdx, field });
     setPickerHour(parsed.hour);
     setPickerMinute(roundMinuteToFive(parsed.minute));
     setPickerAmPm(parsed.ampm);
@@ -1875,24 +2243,20 @@ function AvailabilitySetupScreen({
   }
 
   function savePickedTime() {
-    if (pickerDow === null) return;
+    if (!pickerTarget) return;
     const next = to24hTime(pickerHour, pickerMinute, pickerAmPm);
-    updateWindow(pickerDow, { [pickerField]: next });
+    updateWindow(pickerTarget.dow, pickerTarget.slotIdx, pickerTarget.field, next);
     setPickerVisible(false);
   }
 
   async function save() {
     setSaving(true);
     try {
-      const availability = windows
-        .map((w, dow) =>
-          w.enabled ? { day_of_week: dow, start_time: w.start_time, end_time: w.end_time } : null
-        )
-        .filter(Boolean);
+      const general_call_times = flattenAvailability(windows);
       await fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ timezone, availability }),
+        body: JSON.stringify({ timezone, min_call_minutes: 15, general_call_times }),
       });
       onTimezoneChange(timezone);
     } catch {
@@ -1926,26 +2290,75 @@ function AvailabilitySetupScreen({
           <View key={dow} style={styles.dayRow}>
             <Pressable
               style={[styles.dayToggle, windows[dow].enabled && styles.dayToggleOn]}
-              onPress={() => updateWindow(dow, { enabled: !windows[dow].enabled })}
+              onPress={() =>
+                setWindows((prev) =>
+                  prev.map((day, i) =>
+                    i === dow
+                      ? normalizeDaySlots({
+                          enabled: !day.enabled,
+                          slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots,
+                        })
+                      : day
+                  )
+                )
+              }
             >
-              <Text style={[styles.dayToggleText, windows[dow].enabled && styles.dayToggleTextOn]}>
+              <ButtonLabel style={[styles.dayToggleText, windows[dow].enabled && styles.dayToggleTextOn]}>
                 {label}
-              </Text>
+              </ButtonLabel>
             </Pressable>
             {windows[dow].enabled ? (
-              <View style={styles.timeRange}>
+              <View style={{ flex: 1 }}>
+                {windows[dow].slots.map((slot, slotIdx) => (
+                  <View key={`setup-${dow}-${slotIdx}`} style={[styles.timeRange, { marginBottom: 6 }]}>
+                    <Pressable
+                      style={styles.timeInput}
+                      onPress={() => openTimePicker(dow, slotIdx, "start_time")}
+                    >
+                      <Text style={styles.timeInputText}>{fmt12h(slot.start_time)}</Text>
+                    </Pressable>
+                    <Text style={styles.timeSep}>–</Text>
+                    <Pressable
+                      style={styles.timeInput}
+                      onPress={() => openTimePicker(dow, slotIdx, "end_time")}
+                    >
+                      <Text style={styles.timeInputText}>{fmt12h(slot.end_time)}</Text>
+                    </Pressable>
+                    {windows[dow].slots.length > 1 ? (
+                      <Pressable
+                        onPress={() =>
+                          setWindows((prev) =>
+                            prev.map((day, i) =>
+                              i === dow
+                                ? normalizeDaySlots({
+                                    enabled: day.enabled,
+                                    slots: day.slots.filter((_, idx) => idx !== slotIdx),
+                                  })
+                                : day
+                            )
+                          )
+                        }
+                      >
+                        <Text style={[styles.notesMetaText, { marginTop: 0, marginLeft: 8 }]}>Remove</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ))}
                 <Pressable
-                  style={styles.timeInput}
-                  onPress={() => openTimePicker(dow, "start_time")}
+                  onPress={() =>
+                    setWindows((prev) =>
+                      prev.map((day, i) =>
+                        i === dow
+                          ? normalizeDaySlots({
+                              enabled: true,
+                              slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
+                            })
+                          : day
+                      )
+                    )
+                  }
                 >
-                  <Text style={styles.timeInputText}>{fmt12h(windows[dow].start_time)}</Text>
-                </Pressable>
-                <Text style={styles.timeSep}>–</Text>
-                <Pressable
-                  style={styles.timeInput}
-                  onPress={() => openTimePicker(dow, "end_time")}
-                >
-                  <Text style={styles.timeInputText}>{fmt12h(windows[dow].end_time)}</Text>
+                  <Text style={[styles.notesMetaText, { marginTop: 2 }]}>+ Add more times</Text>
                 </Pressable>
               </View>
             ) : (
@@ -1957,7 +2370,7 @@ function AvailabilitySetupScreen({
 
       <TimePickerModal
         visible={pickerVisible}
-        title={pickerField === "start_time" ? "Choose start time" : "Choose end time"}
+        title={pickerTarget?.field === "start_time" ? "Choose start time" : "Choose end time"}
         hour={pickerHour}
         minute={pickerMinute}
         ampm={pickerAmPm}
@@ -1973,10 +2386,10 @@ function AvailabilitySetupScreen({
         onPress={save}
         disabled={saving}
       >
-        <Text style={styles.primaryBtnText}>{saving ? "Saving…" : "Get Started"}</Text>
+        <ButtonLabel style={styles.primaryBtnText}>{saving ? "Saving…" : "Get Started"}</ButtonLabel>
       </Pressable>
       <Pressable style={styles.linkWrapper} onPress={onDone}>
-        <Text style={styles.linkText}>Skip for now</Text>
+        <ButtonLabel style={styles.linkText}>Skip for now</ButtonLabel>
       </Pressable>
     </ScrollView>
   );
@@ -1987,16 +2400,91 @@ function AvailabilitySetupScreen({
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 interface DayWindow {
-  enabled: boolean;
   start_time: string;
   end_time: string;
 }
 
-const DEFAULT_WINDOWS: DayWindow[] = DAYS.map(() => ({
+interface DaySlots {
+  enabled: boolean;
+  slots: DayWindow[];
+}
+
+function mergeTimeSlots(slots: DayWindow[]): DayWindow[] {
+  if (!slots.length) return [];
+  const sorted = [...slots]
+    .filter((s) => s.start_time && s.end_time && s.start_time < s.end_time)
+    .sort((a, b) => a.start_time.localeCompare(b.start_time));
+  if (!sorted.length) return [];
+
+  const merged: DayWindow[] = [{ ...sorted[0] }];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const cur = sorted[i];
+    const last = merged[merged.length - 1];
+    if (cur.start_time <= last.end_time) {
+      if (cur.end_time > last.end_time) last.end_time = cur.end_time;
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+
+function normalizeDaySlots(day?: Partial<DaySlots> | null): DaySlots {
+  const slots = Array.isArray(day?.slots) ? mergeTimeSlots(day.slots) : [];
+  return { enabled: Boolean(day?.enabled) && slots.length > 0, slots };
+}
+
+const DEFAULT_DAY_SLOTS: DaySlots = {
   enabled: false,
-  start_time: "09:00",
-  end_time: "17:00",
+  slots: [{ start_time: "09:00", end_time: "17:00" }],
+};
+
+const DEFAULT_WINDOWS: DaySlots[] = DAYS.map(() => ({
+  enabled: DEFAULT_DAY_SLOTS.enabled,
+  slots: DEFAULT_DAY_SLOTS.slots.map((s) => ({ ...s })),
 }));
+
+function flattenAvailability(windows: DaySlots[]) {
+  return windows.flatMap((w, dow) =>
+    w.enabled
+      ? w.slots.map((slot) => ({ day_of_week: dow, start_time: slot.start_time, end_time: slot.end_time }))
+      : []
+  );
+}
+
+function fromAvailabilityRows(rows: Array<{ day_of_week: number; start_time: string; end_time: string }>) {
+  const next = DEFAULT_WINDOWS.map((d) => ({ ...d, slots: d.slots.map((s) => ({ ...s })) }));
+  for (const row of rows) {
+    const dow = Number(row.day_of_week);
+    if (!Number.isInteger(dow) || dow < 0 || dow > 6) continue;
+    const current = next[dow];
+    if (!current.enabled) current.slots = [];
+    if (row.start_time && row.end_time && row.start_time < row.end_time) {
+      current.enabled = true;
+      current.slots.push({ start_time: row.start_time, end_time: row.end_time });
+    }
+  }
+  return next.map(normalizeDaySlots);
+}
+
+function formatLastSavedTime(d: Date): string {
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function weekStartKeyFromAnyDate(value: unknown): string | null {
+  if (!value) return null;
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - d.getDay());
+  return d.toISOString().slice(0, 10);
+}
+
+interface TimePickerTarget {
+  dow: number;
+  slotIdx: number;
+  field: "start_time" | "end_time";
+}
 
 function SettingsScreen({
   user,
@@ -2012,15 +2500,27 @@ function SettingsScreen({
   onSyncContacts: () => void;
 }) {
   const [timezone, setTimezone] = useState(initialTimezone || "UTC");
-  const [windows, setWindows] = useState<DayWindow[]>(DEFAULT_WINDOWS);
-  const [saving, setSaving] = useState(false);
+  const [generalWindows, setGeneralWindows] = useState<DaySlots[]>(DEFAULT_WINDOWS);
+  const [thisWeekWindows, setThisWeekWindows] = useState<DaySlots[]>(DEFAULT_WINDOWS);
+  const [minCallMinutes, setMinCallMinutes] = useState<number>(15);
   const [loadingPrefs, setLoadingPrefs] = useState(true);
+  const [savingGeneral, setSavingGeneral] = useState(false);
+  const [savingThisWeek, setSavingThisWeek] = useState(false);
+  const [lastSavedGeneralAt, setLastSavedGeneralAt] = useState<Date | null>(null);
+  const [lastSavedThisWeekAt, setLastSavedThisWeekAt] = useState<Date | null>(null);
   const [pickerVisible, setPickerVisible] = useState(false);
-  const [pickerDow, setPickerDow] = useState<number | null>(null);
-  const [pickerField, setPickerField] = useState<"start_time" | "end_time">("start_time");
+  const [pickerTarget, setPickerTarget] = useState<TimePickerTarget | null>(null);
+  const [pickerMode, setPickerMode] = useState<"general" | "thisWeek">("general");
   const [pickerHour, setPickerHour] = useState<number>(9);
   const [pickerMinute, setPickerMinute] = useState<string>("00");
   const [pickerAmPm, setPickerAmPm] = useState<"AM" | "PM">("AM");
+
+  const googleAuth = useGoogleCalendarAuth({ userId: user.id, apiBase: getApiBase() });
+  const [fillCalLoading, setFillCalLoading] = useState(false);
+  const [fillCurrentWeekLoading, setFillCurrentWeekLoading] = useState(false);
+  const hydratedPrefsRef = useRef(false);
+  const lastGeneralSigRef = useRef("");
+  const lastThisWeekSigRef = useRef("");
 
   useEffect(() => {
     if (initialTimezone) setTimezone(initialTimezone);
@@ -2036,33 +2536,133 @@ function SettingsScreen({
           setTimezone(data.timezone);
           onTimezoneChange(data.timezone);
         }
-        if (Array.isArray(data.availability)) {
-          const next = DEFAULT_WINDOWS.map((def, dow) => {
-            const match = data.availability.find(
-              (w: { day_of_week: number }) => w.day_of_week === dow
-            );
-            return match
-              ? { enabled: true, start_time: match.start_time, end_time: match.end_time }
-              : def;
+        const generalRows = Array.isArray(data.general_call_times)
+          ? data.general_call_times
+          : Array.isArray(data.availability)
+            ? data.availability
+            : [];
+        const nextGeneral = fromAvailabilityRows(generalRows);
+        setGeneralWindows(nextGeneral);
+
+        const currentWeekStart = weekStartKeyFromAnyDate(new Date()) ?? "";
+        const weekRows = (Array.isArray(data.this_week_slots) ? data.this_week_slots : [])
+          .filter((w: { week_start_date?: string }) => {
+            if (!w.week_start_date) return true;
+            const rowWeekStart = weekStartKeyFromAnyDate(w.week_start_date);
+            return rowWeekStart === currentWeekStart;
           });
-          setWindows(next);
+        const nextWeek = fromAvailabilityRows(weekRows);
+        setThisWeekWindows(nextWeek);
+        if (Number.isFinite(Number(data.min_call_minutes))) {
+          setMinCallMinutes(Math.max(1, Number(data.min_call_minutes)));
         }
+        const effectiveTimezone =
+          data.timezone && (!initialTimezone || initialTimezone === "UTC")
+            ? data.timezone
+            : timezone;
+        const effectiveMin = Number.isFinite(Number(data.min_call_minutes))
+          ? Math.max(1, Number(data.min_call_minutes))
+          : minCallMinutes;
+        lastGeneralSigRef.current = JSON.stringify({
+          timezone: effectiveTimezone,
+          minCallMinutes: effectiveMin,
+          general: flattenAvailability(nextGeneral),
+        });
+        lastThisWeekSigRef.current = JSON.stringify({
+          thisWeek: flattenAvailability(nextWeek),
+        });
+        hydratedPrefsRef.current = true;
       })
       .catch(() => {})
       .finally(() => setLoadingPrefs(false));
   }, [user.id, initialTimezone]);
 
-  function updateWindow(dow: number, patch: Partial<DayWindow>) {
-    setWindows((prev) =>
-      prev.map((w, i) => (i === dow ? { ...w, ...patch } : w))
+  useEffect(() => {
+    if (!googleAuth.connected) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (!cancelled && Array.isArray(data.slots)) {
+          setThisWeekWindows(fromAvailabilityRows(data.slots));
+        }
+      } catch {
+        // non-fatal
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [googleAuth.connected, user.id]);
+
+  function updateDaySlot(
+    mode: "general" | "thisWeek",
+    dow: number,
+    slotIdx: number,
+    field: "start_time" | "end_time",
+    value: string
+  ) {
+    const setter = mode === "general" ? setGeneralWindows : setThisWeekWindows;
+    setter((prev) =>
+      prev.map((day, i) => {
+        if (i !== dow) return day;
+        const slots = day.slots.map((slot, idx) => (idx === slotIdx ? { ...slot, [field]: value } : slot));
+        return normalizeDaySlots({ enabled: day.enabled, slots });
+      })
     );
   }
 
-  function openTimePicker(dow: number, field: "start_time" | "end_time") {
-    const current = windows[dow][field];
+  function toggleDay(mode: "general" | "thisWeek", dow: number) {
+    const setter = mode === "general" ? setGeneralWindows : setThisWeekWindows;
+    setter((prev) =>
+      prev.map((day, i) => {
+        if (i !== dow) return day;
+        if (day.enabled) return { ...day, enabled: false };
+        return normalizeDaySlots({ enabled: true, slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots });
+      })
+    );
+  }
+
+  function addMoreTimes(dow: number) {
+    setGeneralWindows((prev) =>
+      prev.map((day, i) =>
+        i === dow
+          ? normalizeDaySlots({
+              enabled: true,
+              slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
+            })
+          : day
+      )
+    );
+  }
+
+  function removeSlot(mode: "general" | "thisWeek", dow: number, slotIdx: number) {
+    const setter = mode === "general" ? setGeneralWindows : setThisWeekWindows;
+    setter((prev) =>
+      prev.map((day, i) => {
+        if (i !== dow) return day;
+        const slots = day.slots.filter((_, idx) => idx !== slotIdx);
+        return normalizeDaySlots({ enabled: day.enabled && slots.length > 0, slots });
+      })
+    );
+  }
+
+  function openTimePicker(
+    mode: "general" | "thisWeek",
+    dow: number,
+    slotIdx: number,
+    field: "start_time" | "end_time"
+  ) {
+    const source = mode === "general" ? generalWindows : thisWeekWindows;
+    const current = source[dow]?.slots?.[slotIdx]?.[field] ?? "09:00";
     const parsed = parseTime12h(current);
-    setPickerDow(dow);
-    setPickerField(field);
+    setPickerTarget({ dow, slotIdx, field });
+    setPickerMode(mode);
     setPickerHour(parsed.hour);
     setPickerMinute(roundMinuteToFive(parsed.minute));
     setPickerAmPm(parsed.ampm);
@@ -2070,35 +2670,106 @@ function SettingsScreen({
   }
 
   function savePickedTime() {
-    if (pickerDow === null) return;
+    if (!pickerTarget) return;
     const next = to24hTime(pickerHour, pickerMinute, pickerAmPm);
-    updateWindow(pickerDow, { [pickerField]: next });
+    updateDaySlot(pickerMode, pickerTarget.dow, pickerTarget.slotIdx, pickerTarget.field, next);
     setPickerVisible(false);
   }
 
-  async function savePreferences() {
-    setSaving(true);
+  async function persistPreferences(source: "general" | "thisWeek") {
+    if (!hydratedPrefsRef.current) return;
+    if (source === "general") setSavingGeneral(true);
+    else setSavingThisWeek(true);
     try {
-      const availability = windows
-        .map((w, dow) =>
-          w.enabled ? { day_of_week: dow, start_time: w.start_time, end_time: w.end_time } : null
-        )
-        .filter(Boolean);
+      const general_call_times = flattenAvailability(generalWindows);
+      const this_week_slots = flattenAvailability(thisWeekWindows);
+      const body =
+        source === "general"
+          ? {
+              timezone,
+              min_call_minutes: minCallMinutes,
+              general_call_times,
+              // Backward compatibility for older server expecting "availability"
+              availability: general_call_times,
+            }
+          : {
+              timezone,
+              this_week_slots,
+              // Backward compatibility for older server expecting "availability"
+              availability: general_call_times,
+            };
 
       const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ timezone, availability }),
+        body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const payload = await res.json();
+          if (payload?.error) detail = String(payload.error);
+        } catch {
+          // ignore non-json response
+        }
+        throw new Error(detail ? `Server error: ${res.status} (${detail})` : `Server error: ${res.status}`);
+      }
       onTimezoneChange(timezone);
-      Alert.alert("Saved", "Your preferences have been updated.");
+      const now = new Date();
+      if (source === "general") {
+        setLastSavedGeneralAt(now);
+      } else {
+        setLastSavedThisWeekAt(now);
+      }
+      lastGeneralSigRef.current = JSON.stringify({
+        timezone,
+        minCallMinutes,
+        general: general_call_times,
+      });
+      lastThisWeekSigRef.current = JSON.stringify({
+        thisWeek: this_week_slots,
+      });
     } catch (e: unknown) {
-      Alert.alert("Error", e instanceof Error ? e.message : "Could not save preferences.");
+      Alert.alert(
+        "Error",
+        e instanceof Error
+          ? e.message
+          : source === "thisWeek"
+            ? "Could not save This Week changes."
+            : "Could not save General Call Times changes."
+      );
     } finally {
-      setSaving(false);
+      if (source === "general") setSavingGeneral(false);
+      else setSavingThisWeek(false);
     }
   }
+
+  const generalSig = JSON.stringify({
+    timezone,
+    minCallMinutes,
+    general: flattenAvailability(generalWindows),
+  });
+  const thisWeekSig = JSON.stringify({
+    thisWeek: flattenAvailability(thisWeekWindows),
+  });
+
+  useEffect(() => {
+    if (!hydratedPrefsRef.current || loadingPrefs) return;
+    if (generalSig === lastGeneralSigRef.current) return;
+    const timer = setTimeout(() => {
+      void persistPreferences("general");
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [generalSig, loadingPrefs]);
+
+  useEffect(() => {
+    if (!hydratedPrefsRef.current || loadingPrefs) return;
+    if (thisWeekSig === lastThisWeekSigRef.current) return;
+    const timer = setTimeout(() => {
+      void persistPreferences("thisWeek");
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [thisWeekSig, loadingPrefs]);
 
   function confirmLogout() {
     Alert.alert("Log Out", "Are you sure you want to log out?", [
@@ -2111,83 +2782,277 @@ function SettingsScreen({
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
       <Text style={styles.greeting}>Settings</Text>
 
-      <View style={styles.card}>
-        <Text style={styles.settingsLabel}>NAME</Text>
-        <Text style={styles.settingsValue}>{user.display_name}</Text>
-        <Text style={styles.settingsLabel}>PHONE</Text>
-        <Text style={styles.settingsValue}>{formatPhoneDisplay(user.phone_e164)}</Text>
-      </View>
-
       <Text style={styles.sectionTitle}>Calling Availability</Text>
       <Text style={styles.availHint}>
         Nudges are only sent during the times you mark as available. Leave all days off to
         receive nudges at any time.
       </Text>
 
+      <View style={styles.card}>
+        <View style={styles.googleCalHeaderRow}>
+          <View style={styles.googleCalTitleRow}>
+            <Ionicons name="calendar-outline" size={14} color="#9aa0a6" />
+            <Text style={[styles.settingsLabel, { marginTop: 0, marginBottom: 0, marginLeft: 6 }]}>
+              GOOGLE CALENDAR
+            </Text>
+          </View>
+          <Text
+            style={[
+              styles.googleCalStatusText,
+              googleAuth.connected ? styles.googleCalStatusConnected : styles.googleCalStatusDisconnected,
+            ]}
+          >
+            {googleAuth.connected ? "Connected" : "Not connected"}
+          </Text>
+        </View>
+        {!googleAuth.connected ? (
+          <View style={styles.googleCalBtnRow}>
+            <Pressable
+              style={[
+                styles.outlineBtn,
+                { marginTop: 0, flex: 1 },
+                !googleAuth.canConnect && styles.btnDisabled,
+              ]}
+              onPress={async () => {
+                const r = await googleAuth.connect();
+                if (!r.ok && r.message) Alert.alert("Google", r.message);
+              }}
+              disabled={!googleAuth.canConnect}
+            >
+              <ButtonLabel style={styles.outlineBtnText}>Connect</ButtonLabel>
+            </Pressable>
+          </View>
+        ) : null}
+        {googleAuth.connected ? (
+          <Pressable
+            style={[styles.outlineBtn, { marginTop: 10 }]}
+            onPress={() => void googleAuth.disconnect()}
+          >
+            <ButtonLabel style={styles.outlineBtnText}>Disconnect</ButtonLabel>
+          </Pressable>
+        ) : null}
+        {!googleAuth.canConnect ? (
+          <Text style={styles.notesMetaText}>
+            {getGoogleOAuthSetupHint() ??
+              (Platform.OS === "android"
+                ? "Google Calendar sign-in isn’t set up for Android in this build. Use iOS, or add an Android OAuth client and native config later."
+                : isExpoGoRuntime()
+                  ? `Expo Go: set GOOGLE_WEB_CLIENT_ID to a Web application OAuth client (not iOS-only). In Google Cloud, add Authorized redirect URI: ${String((Constants.expoConfig?.extra as { expoAuthProxyRedirect?: string })?.expoAuthProxyRedirect ?? "https://auth.expo.io/@OWNER/SLUG")} and Authorized JavaScript origin https://auth.expo.io`
+                  : "Set GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID in the app environment to enable Google Calendar on iOS.")}
+          </Text>
+        ) : null}
+        {googleAuth.canConnect && Platform.OS === "ios" && isExpoGoRuntime() ? (
+          <Text style={[styles.notesMetaText, { marginTop: 10 }]}>
+            If Google consent works but you see a blank auth.expo.io page (“Something went wrong trying to
+            finish signing in”), that’s the Expo auth proxy — it often fails after Google. Use a development
+            build instead: add EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID (iOS OAuth client) alongside your Web client
+            ID in mobile/.env, then from that folder run npx expo run:ios and connect again (native redirect,
+            no proxy).
+          </Text>
+        ) : null}
+      </View>
+
       {loadingPrefs ? (
         <ActivityIndicator color={PURPLE} style={styles.loader} />
       ) : (
-        <View style={styles.card}>
-          <Text style={styles.settingsLabel}>TIMEZONE</Text>
-          <TimezoneDropdown
-            value={timezone}
-            onChange={(next) => {
-              setTimezone(next);
-              onTimezoneChange(next);
-            }}
-          />
-          <Text style={styles.settingsLabel}>AVAILABLE DAYS & TIMES</Text>
-          {DAYS.map((label, dow) => (
-            <View key={dow} style={styles.dayRow}>
-              <Pressable
-                style={[styles.dayToggle, windows[dow].enabled && styles.dayToggleOn]}
-                onPress={() => updateWindow(dow, { enabled: !windows[dow].enabled })}
-              >
-                <Text
-                  style={[
-                    styles.dayToggleText,
-                    windows[dow].enabled && styles.dayToggleTextOn,
-                  ]}
-                >
-                  {label}
-                </Text>
-              </Pressable>
-              {windows[dow].enabled ? (
-                <View style={styles.timeRange}>
-                  <Pressable
-                    style={styles.timeInput}
-                    onPress={() => openTimePicker(dow, "start_time")}
-                  >
-                    <Text style={styles.timeInputText}>{fmt12h(windows[dow].start_time)}</Text>
-                  </Pressable>
-                  <Text style={styles.timeSep}>–</Text>
-                  <Pressable
-                    style={styles.timeInput}
-                    onPress={() => openTimePicker(dow, "end_time")}
-                  >
-                    <Text style={styles.timeInputText}>{fmt12h(windows[dow].end_time)}</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <Text style={styles.dayOff}>Off</Text>
-              )}
-            </View>
-          ))}
-          <Pressable
-            style={[styles.primaryBtn, saving && styles.btnDisabled]}
-            onPress={savePreferences}
-            disabled={saving}
-          >
-            <Text style={styles.primaryBtnText}>
-              {saving ? "Saving…" : "Save Preferences"}
+        <>
+          <View style={[styles.card, { marginTop: 14 }]}>
+            <Text style={[styles.sectionTitle, { marginTop: 2, marginBottom: 4 }]}>This Week</Text>
+            <Text style={styles.availHint}>
+              Derived from General Call Times and your Google Calendar events for this Sunday-Saturday week.
             </Text>
-          </Pressable>
-        </View>
+            {DAYS.map((label, dow) => (
+              <View key={`week-${dow}`} style={styles.dayRow}>
+                <Text style={[styles.dayOff, { width: 48 }]}>{label}</Text>
+                {thisWeekWindows[dow].enabled ? (
+                  <View style={{ flex: 1 }}>
+                    {thisWeekWindows[dow].slots.map((slot, slotIdx) => (
+                      <View key={`week-${dow}-${slotIdx}`} style={[styles.timeRange, { marginBottom: 6 }]}>
+                        <Pressable
+                          style={styles.timeInput}
+                          onPress={() => openTimePicker("thisWeek", dow, slotIdx, "start_time")}
+                        >
+                          <Text style={styles.timeInputText}>{fmt12h(slot.start_time)}</Text>
+                        </Pressable>
+                        <Text style={styles.timeSep}>–</Text>
+                        <Pressable
+                          style={styles.timeInput}
+                          onPress={() => openTimePicker("thisWeek", dow, slotIdx, "end_time")}
+                        >
+                          <Text style={styles.timeInputText}>{fmt12h(slot.end_time)}</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                ) : (
+                  <Text style={styles.dayOff}>No slots</Text>
+                )}
+              </View>
+            ))}
+            <Pressable
+              style={[
+                styles.primaryBtn,
+                { marginTop: 8 },
+                (fillCurrentWeekLoading || fillCalLoading || !googleAuth.connected) && styles.btnDisabled,
+              ]}
+              onPress={async () => {
+                const token = await getValidAccessToken();
+                if (!token) {
+                  Alert.alert("Connect Google", "Connect your Google account first.");
+                  return;
+                }
+                setFillCurrentWeekLoading(true);
+                try {
+                  const next = await fetchThisWeekSlotsFromCalendar({
+                    accessToken: token,
+                    timezone,
+                    general: generalWindows,
+                    minCallMinutes,
+                  });
+                  setThisWeekWindows(next);
+                  Alert.alert(
+                    "Current week updated",
+                    "Availability was updated using your calendar events for this week."
+                  );
+
+                  await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                  }).catch(() => {});
+                } catch (e: unknown) {
+                  Alert.alert("Calendar", e instanceof Error ? e.message : "Could not read calendar.");
+                } finally {
+                  setFillCurrentWeekLoading(false);
+                }
+              }}
+              disabled={fillCurrentWeekLoading || fillCalLoading || !googleAuth.connected}
+            >
+              <ButtonLabel style={styles.primaryBtnText}>
+                {fillCurrentWeekLoading ? "Loading…" : "Update availability for current week"}
+              </ButtonLabel>
+            </Pressable>
+            <Text style={styles.panelSavedText}>
+              {savingThisWeek
+                ? "Saving..."
+                : lastSavedThisWeekAt
+                  ? `Last saved at ${formatLastSavedTime(lastSavedThisWeekAt)}`
+                  : ""}
+            </Text>
+          </View>
+
+          <View style={[styles.card, { marginTop: 14 }]}>
+            <Text style={[styles.sectionTitle, { marginTop: 2, marginBottom: 4 }]}>General Call Times</Text>
+            <Text style={styles.settingsLabel}>TIMEZONE</Text>
+            <TimezoneDropdown
+              value={timezone}
+              onChange={(next) => {
+                setTimezone(next);
+                onTimezoneChange(next);
+              }}
+            />
+            <Text style={styles.settingsLabel}>MINIMUM CALL TIME (MINUTES)</Text>
+            <TextInput
+              style={[styles.timeInput, { width: 120, marginTop: 6 }]}
+              keyboardType="number-pad"
+              value={String(minCallMinutes)}
+              onChangeText={(txt) => setMinCallMinutes(Math.max(1, parseInt(txt || "0", 10) || 1))}
+            />
+            <Text style={styles.settingsLabel}>GENERAL CALL TIMES</Text>
+            {DAYS.map((label, dow) => (
+              <View key={`gen-${dow}`} style={styles.dayRow}>
+                <Pressable
+                  style={[styles.dayToggle, generalWindows[dow].enabled && styles.dayToggleOn]}
+                  onPress={() => toggleDay("general", dow)}
+                >
+                  <ButtonLabel style={[styles.dayToggleText, generalWindows[dow].enabled && styles.dayToggleTextOn]}>
+                    {label}
+                  </ButtonLabel>
+                </Pressable>
+                {generalWindows[dow].enabled ? (
+                  <View style={{ flex: 1 }}>
+                    {generalWindows[dow].slots.map((slot, slotIdx) => (
+                      <View key={`gen-${dow}-${slotIdx}`} style={[styles.timeRange, { marginBottom: 6 }]}>
+                        <Pressable
+                          style={styles.timeInput}
+                          onPress={() => openTimePicker("general", dow, slotIdx, "start_time")}
+                        >
+                          <Text style={styles.timeInputText}>{fmt12h(slot.start_time)}</Text>
+                        </Pressable>
+                        <Text style={styles.timeSep}>–</Text>
+                        <Pressable
+                          style={styles.timeInput}
+                          onPress={() => openTimePicker("general", dow, slotIdx, "end_time")}
+                        >
+                          <Text style={styles.timeInputText}>{fmt12h(slot.end_time)}</Text>
+                        </Pressable>
+                        {generalWindows[dow].slots.length > 1 ? (
+                          <Pressable onPress={() => removeSlot("general", dow, slotIdx)}>
+                            <Text style={[styles.notesMetaText, { marginTop: 0, marginLeft: 8 }]}>Remove</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ))}
+                    <Pressable onPress={() => addMoreTimes(dow)}>
+                      <Text style={[styles.notesMetaText, { marginTop: 2 }]}>+ Add more times</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Text style={styles.dayOff}>Off</Text>
+                )}
+              </View>
+            ))}
+            <Pressable
+              style={[
+                styles.primaryBtn,
+                { marginTop: 8 },
+                (fillCalLoading || fillCurrentWeekLoading || !googleAuth.connected) && styles.btnDisabled,
+              ]}
+              onPress={async () => {
+                const token = await getValidAccessToken();
+                if (!token) {
+                  Alert.alert("Connect Google", "Connect your Google account first.");
+                  return;
+                }
+                setFillCalLoading(true);
+                try {
+                  const next = await fetchAvailabilityWindowsFromCalendar(token, timezone);
+                  setGeneralWindows(
+                    next.map((w) =>
+                      w.enabled
+                        ? { enabled: true, slots: [{ start_time: w.start_time, end_time: w.end_time }] }
+                        : { ...DEFAULT_DAY_SLOTS, enabled: false }
+                    )
+                  );
+                  Alert.alert(
+                    "General call times updated",
+                    "Review the suggested times. Changes save automatically."
+                  );
+                } catch (e: unknown) {
+                  Alert.alert("Calendar", e instanceof Error ? e.message : "Could not read calendar.");
+                } finally {
+                  setFillCalLoading(false);
+                }
+              }}
+              disabled={fillCalLoading || fillCurrentWeekLoading || !googleAuth.connected}
+            >
+              <ButtonLabel style={styles.primaryBtnText}>
+                {fillCalLoading ? "Loading…" : "Fill availability from calendar"}
+              </ButtonLabel>
+            </Pressable>
+            <Text style={styles.panelSavedText}>
+              {savingGeneral
+                ? "Saving..."
+                : lastSavedGeneralAt
+                  ? `Last saved at ${formatLastSavedTime(lastSavedGeneralAt)}`
+                  : ""}
+            </Text>
+          </View>
+        </>
       )}
 
       <TimePickerModal
         visible={pickerVisible}
-        title={pickerField === "start_time" ? "Choose start time" : "Choose end time"}
+        title={pickerTarget?.field === "start_time" ? "Choose start time" : "Choose end time"}
         hour={pickerHour}
         minute={pickerMinute}
         ampm={pickerAmPm}
@@ -2199,11 +3064,18 @@ function SettingsScreen({
       />
 
       <Pressable style={styles.syncBtn} onPress={onSyncContacts}>
-        <Text style={styles.syncBtnText}>Add Contacts</Text>
+        <ButtonLabel style={styles.syncBtnText}>Add Contacts</ButtonLabel>
       </Pressable>
 
+      <View style={[styles.card, { marginTop: 16 }]}>
+        <Text style={[styles.settingsLabel, { marginTop: 0 }]}>NAME</Text>
+        <Text style={styles.settingsValue}>{user.display_name}</Text>
+        <Text style={styles.settingsLabel}>PHONE</Text>
+        <Text style={styles.settingsValue}>{formatPhoneDisplay(user.phone_e164)}</Text>
+      </View>
+
       <Pressable style={styles.logoutBtn} onPress={confirmLogout}>
-        <Text style={styles.logoutBtnText}>Log Out</Text>
+        <ButtonLabel style={styles.logoutBtnText}>Log Out</ButtonLabel>
       </Pressable>
     </ScrollView>
   );
@@ -2232,9 +3104,9 @@ function TabBar({
             size={18}
             style={[styles.tabIcon, activeTab === key && styles.tabIconActive]}
           />
-          <Text style={[styles.tabLabel, activeTab === key && styles.tabLabelActive]}>
+          <ButtonLabel style={[styles.tabLabel, activeTab === key && styles.tabLabelActive]}>
             {label}
-          </Text>
+          </ButtonLabel>
         </Pressable>
       ))}
     </View>
@@ -2244,12 +3116,16 @@ function TabBar({
 // ── Styles ─────────────────────────────────────────────────────────────────
 
 const PURPLE = "#7c3aed";
+const GREETING_FONT_FAMILY = "Limelight_400Regular";
+const CONTACT_SEARCH_PLACEHOLDER = "#555555";
 const TIME_PICKER_ROW_HEIGHT = 42;
 const TIME_PICKER_WHEEL_HEIGHT = 200;
 const TIME_PICKER_CENTER_TOP = (TIME_PICKER_WHEEL_HEIGHT - TIME_PICKER_ROW_HEIGHT) / 2;
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f6f7fb" },
+  tabScreen: { flex: 1 },
+  tabScreenHidden: { display: "none" },
   center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f6f7fb" },
 
   // Auth
@@ -2277,21 +3153,24 @@ const styles = StyleSheet.create({
     padding: 16,
     alignItems: "center",
     marginTop: 28,
+    minWidth: 0,
   },
   btnDisabled: { opacity: 0.6 },
+  btnLabelShrink: { width: "100%", textAlign: "center" },
   primaryBtnText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   linkWrapper: { marginTop: 20, alignItems: "center" },
-  linkText: { color: "#666", fontSize: 14 },
+  linkText: { color: "#666", fontSize: 14, width: "100%", textAlign: "center" },
   linkBold: { color: PURPLE, fontWeight: "600" },
 
   // App screens
   screen: { flex: 1, backgroundColor: "#f6f7fb" },
   screenContent: { padding: 20, paddingBottom: 48 },
   greeting: {
+    fontFamily: GREETING_FONT_FAMILY,
     fontSize: 24,
-    fontWeight: "700",
     marginBottom: 8,
     marginTop: Platform.OS === "ios" ? 52 : 24,
+    color: "#111",
   },
   sectionTitle: {
     fontSize: 12,
@@ -2321,6 +3200,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     alignItems: "center",
+    minWidth: 0,
   },
   callBtnText: { color: "#fff", fontWeight: "600", fontSize: 15 },
   emptyText: { color: "#aaa", fontSize: 14 },
@@ -2331,6 +3211,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 14,
     alignItems: "center",
+    minWidth: 0,
   },
   homeAddContactsBtnText: { color: PURPLE, fontWeight: "600", fontSize: 15 },
 
@@ -2380,6 +3261,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ddd",
     backgroundColor: "#f7f7f7",
+    minWidth: 0,
   },
   segmentBtnActive: { backgroundColor: PURPLE, borderColor: PURPLE },
   segmentBtnText: { fontSize: 13, color: "#666" },
@@ -2397,12 +3279,22 @@ const styles = StyleSheet.create({
   dayChipText: { fontSize: 13, color: "#666" },
   dayChipTextActive: { color: "#fff", fontWeight: "600" },
   notesMetaText: { marginTop: 10, fontSize: 12, color: "#888" },
+  panelSavedText: { marginTop: 8, fontSize: 11, color: "#94a3b8", textAlign: "right" },
+  calendarHint: { marginTop: 8, fontSize: 13, color: "#64748b" },
+  calendarWarning: { marginTop: 8, fontSize: 13, color: "#b45309" },
+  googleCalHeaderRow: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" },
+  googleCalTitleRow: { flexDirection: "row", alignItems: "center" },
+  googleCalStatusText: { fontSize: 12, fontWeight: "500" },
+  googleCalStatusConnected: { color: "#22c55e" },
+  googleCalStatusDisconnected: { color: "#9ca3af" },
+  googleCalBtnRow: { flexDirection: "row", marginTop: 8 },
   outlineBtn: {
     borderWidth: 1.5,
     borderColor: PURPLE,
     borderRadius: 10,
     padding: 14,
     alignItems: "center",
+    minWidth: 0,
   },
   outlineBtnText: { color: PURPLE, fontWeight: "600", fontSize: 15 },
 
@@ -2421,6 +3313,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     flexDirection: "row",
     alignItems: "center",
+    minWidth: 0,
   },
   timezoneButtonText: { flex: 1, color: "#222", fontSize: 14 },
   timezonePlaceholder: { flex: 1, color: "#999", fontSize: 14 },
@@ -2526,14 +3419,16 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 16,
     alignItems: "center",
+    minWidth: 0,
   },
   syncBtnText: { color: PURPLE, fontWeight: "600", fontSize: 16 },
   contactSearch: {
-    borderBottomWidth: 1,
-    borderBottomColor: "#eee",
+    borderWidth: 1,
+    borderColor: "#e8e8e8",
+    borderRadius: 10,
     padding: 12,
     fontSize: 15,
-    backgroundColor: "#fafafa",
+    backgroundColor: "#ffffff",
   },
   logoutBtn: {
     marginTop: 32,
@@ -2542,6 +3437,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 16,
     alignItems: "center",
+    minWidth: 0,
   },
   logoutBtnText: { color: "#e53e3e", fontWeight: "600", fontSize: 16 },
 
@@ -2554,7 +3450,7 @@ const styles = StyleSheet.create({
     paddingBottom: Platform.OS === "ios" ? 28 : 8,
     paddingTop: 10,
   },
-  tabItem: { flex: 1, alignItems: "center" },
+  tabItem: { flex: 1, alignItems: "center", minWidth: 0 },
   tabIcon: { fontSize: 15, color: "#aaa", marginBottom: 2 },
   tabIconActive: { color: PURPLE },
   tabLabel: { fontSize: 12, color: "#aaa" },

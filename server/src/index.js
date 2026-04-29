@@ -5,6 +5,11 @@ import cron from "node-cron";
 import { pool } from "./db.js";
 import { sendNudge } from "./push.js";
 import { passFrequencyNudges, passScheduledCalls } from "./scheduler.js";
+import {
+  computeAndPersistThisWeekAvailability,
+  refreshThisWeekAvailabilityForAllConnectedUsers,
+  upsertGoogleTokensForUser,
+} from "./weeklyAvailabilitySync.js";
 
 const app = express();
 app.use(cors());
@@ -16,6 +21,68 @@ const PORT = Number(process.env.PORT) || 3001;
 pool
   .query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS notes TEXT`)
   .catch((e) => console.error("schema compatibility check failed:", e));
+pool
+  .query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS min_call_minutes INT NOT NULL DEFAULT 15`)
+  .catch((e) => console.error("schema compatibility check failed:", e));
+pool
+  .query(
+    `CREATE TABLE IF NOT EXISTS user_week_availability (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+      week_start_date DATE NOT NULL,
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TIME NOT NULL,
+      end_time TIME NOT NULL,
+      CHECK (end_time > start_time)
+    )`
+  )
+  .catch((e) => console.error("schema compatibility check failed:", e));
+pool
+  .query(
+    `CREATE TABLE IF NOT EXISTS user_google_tokens (
+      user_id UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+      refresh_token BYTEA,
+      access_token BYTEA,
+      token_expiry TIMESTAMPTZ,
+      scope TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`
+  )
+  .catch((e) => console.error("schema compatibility check failed:", e));
+
+function normalizeAvailabilityRows(rows = []) {
+  return rows
+    .map((w) => ({
+      day_of_week: Number(w.day_of_week),
+      start_time: String(w.start_time ?? ""),
+      end_time: String(w.end_time ?? ""),
+    }))
+    .filter(
+      (w) =>
+        Number.isInteger(w.day_of_week) &&
+        w.day_of_week >= 0 &&
+        w.day_of_week <= 6 &&
+        w.start_time &&
+        w.end_time &&
+        w.start_time < w.end_time
+    );
+}
+
+function hasOverlaps(rows) {
+  const byDow = new Map();
+  for (const row of rows) {
+    const arr = byDow.get(row.day_of_week) ?? [];
+    arr.push(row);
+    byDow.set(row.day_of_week, arr);
+  }
+  for (const [, dayRows] of byDow) {
+    const sorted = [...dayRows].sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
+    for (let i = 1; i < sorted.length; i += 1) {
+      if (sorted[i].start_time < sorted[i - 1].end_time) return true;
+    }
+  }
+  return false;
+}
 
 function parseScheduleInput(body = {}) {
   const { contactId, recurrence, dayOfWeek, dayOfMonth, scheduledTime } = body;
@@ -210,7 +277,7 @@ app.get("/users/:userId/preferences", async (req, res) => {
   const { userId } = req.params;
   try {
     const userRow = await pool.query(
-      `SELECT timezone FROM users WHERE id = $1`,
+      `SELECT timezone, min_call_minutes FROM users WHERE id = $1`,
       [userId]
     );
     if (!userRow.rows[0]) return res.status(404).json({ error: "user_not_found" });
@@ -223,7 +290,24 @@ app.get("/users/:userId/preferences", async (req, res) => {
        ORDER BY day_of_week, start_time`,
       [userId]
     );
-    res.json({ timezone: userRow.rows[0].timezone, availability: avail.rows });
+    const thisWeek = await pool.query(
+      `SELECT week_start_date,
+              day_of_week,
+              to_char(start_time, 'HH24:MI') AS start_time,
+              to_char(end_time,   'HH24:MI') AS end_time
+       FROM user_week_availability
+       WHERE user_id = $1
+       ORDER BY week_start_date DESC, day_of_week, start_time`,
+      [userId]
+    );
+    res.json({
+      timezone: userRow.rows[0].timezone,
+      min_call_minutes: Number(userRow.rows[0].min_call_minutes ?? 15),
+      general_call_times: avail.rows,
+      this_week_slots: thisWeek.rows,
+      // Backward compatibility with existing mobile shape:
+      availability: avail.rows,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "db_error" });
@@ -232,23 +316,84 @@ app.get("/users/:userId/preferences", async (req, res) => {
 
 app.put("/users/:userId/preferences", async (req, res) => {
   const { userId } = req.params;
-  const { timezone, availability } = req.body ?? {};
-  if (!timezone) return res.status(400).json({ error: "timezone required" });
-  if (!Array.isArray(availability)) return res.status(400).json({ error: "availability must be an array" });
+  const {
+    timezone,
+    availability,
+    general_call_times,
+    min_call_minutes,
+    this_week_slots,
+  } = req.body ?? {};
+  const hasGeneralPayload = Array.isArray(general_call_times) || Array.isArray(availability);
+  const hasWeekPayload = Array.isArray(this_week_slots);
+  const hasTimezonePayload = typeof timezone === "string" && timezone.trim().length > 0;
+  const hasMinCallPayload = min_call_minutes != null;
+
+  if (!hasGeneralPayload && !hasWeekPayload && !hasTimezonePayload && !hasMinCallPayload) {
+    return res.status(400).json({ error: "no preference fields provided" });
+  }
+
+  const general = Array.isArray(general_call_times)
+    ? general_call_times
+    : Array.isArray(availability)
+      ? availability
+      : [];
+  const normalizedGeneral = normalizeAvailabilityRows(general);
+  const normalizedWeek = Array.isArray(this_week_slots) ? normalizeAvailabilityRows(this_week_slots) : [];
+  if (hasGeneralPayload && hasOverlaps(normalizedGeneral)) {
+    return res.status(400).json({ error: "general_call_times has overlapping slots" });
+  }
+  if (hasWeekPayload && hasOverlaps(normalizedWeek)) {
+    return res.status(400).json({ error: "this_week_slots has overlapping slots" });
+  }
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`UPDATE users SET timezone = $1 WHERE id = $2`, [timezone, userId]);
-    await client.query(`DELETE FROM user_availability WHERE user_id = $1`, [userId]);
-    for (const w of availability) {
-      const { day_of_week, start_time, end_time } = w;
-      if (day_of_week == null || !start_time || !end_time) continue;
+    const userCurrent = await client.query(`SELECT timezone, min_call_minutes FROM users WHERE id = $1`, [userId]);
+    if (!userCurrent.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "user_not_found" });
+    }
+    const effectiveTimezone = hasTimezonePayload
+      ? timezone.trim()
+      : userCurrent.rows[0].timezone;
+    const effectiveMinCall = hasMinCallPayload
+      ? Math.max(1, Number(min_call_minutes) || 1)
+      : Number(userCurrent.rows[0].min_call_minutes ?? 15);
+
+    if (hasTimezonePayload || hasMinCallPayload) {
+      await client.query(`UPDATE users SET timezone = $1, min_call_minutes = $2 WHERE id = $3`, [
+        effectiveTimezone,
+        effectiveMinCall,
+        userId,
+      ]);
+    }
+
+    if (hasGeneralPayload) {
+      await client.query(`DELETE FROM user_availability WHERE user_id = $1`, [userId]);
+      for (const w of normalizedGeneral) {
+        await client.query(
+          `INSERT INTO user_availability (user_id, day_of_week, start_time, end_time)
+           VALUES ($1, $2, $3, $4)`,
+          [userId, w.day_of_week, w.start_time, w.end_time]
+        );
+      }
+    }
+
+    if (hasWeekPayload) {
+      const weekStartExpr = `(date_trunc('day', now() AT TIME ZONE $2)::date - EXTRACT(DOW FROM now() AT TIME ZONE $2)::int)`;
       await client.query(
-        `INSERT INTO user_availability (user_id, day_of_week, start_time, end_time)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, day_of_week, start_time, end_time]
+        `DELETE FROM user_week_availability
+         WHERE user_id = $1 AND week_start_date = ${weekStartExpr}`,
+        [userId, effectiveTimezone]
       );
+      for (const w of normalizedWeek) {
+        await client.query(
+          `INSERT INTO user_week_availability (user_id, week_start_date, day_of_week, start_time, end_time)
+           VALUES ($1, ${weekStartExpr}, $3, $4, $5)`,
+          [userId, effectiveTimezone, w.day_of_week, w.start_time, w.end_time]
+        );
+      }
     }
     await client.query("COMMIT");
     res.json({ ok: true });
@@ -258,6 +403,42 @@ app.put("/users/:userId/preferences", async (req, res) => {
     res.status(500).json({ error: "db_error" });
   } finally {
     client.release();
+  }
+});
+
+app.post("/users/:userId/google-calendar-token", async (req, res) => {
+  const { userId } = req.params;
+  const { refreshToken, accessToken, expiresIn, scope } = req.body ?? {};
+  if (!refreshToken && !accessToken) {
+    return res.status(400).json({ error: "refreshToken or accessToken required" });
+  }
+  try {
+    await upsertGoogleTokensForUser({
+      userId,
+      refreshToken: refreshToken ?? null,
+      accessToken: accessToken ?? null,
+      expiresInSec: expiresIn ?? null,
+      scope: scope ?? null,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "token_store_failed" });
+  }
+});
+
+app.post("/users/:userId/this-week/refresh", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const out = await computeAndPersistThisWeekAvailability(userId);
+    res.json({
+      ok: true,
+      week_start_date: out.weekStart.toISOString().slice(0, 10),
+      slots: out.slots,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "this_week_refresh_failed", message: e.message });
   }
 });
 
@@ -434,6 +615,7 @@ app.listen(PORT, () => {
 cron.schedule("*/5 * * * *", async () => {
   console.log("scheduler: running");
   try {
+    await refreshThisWeekAvailabilityForAllConnectedUsers();
     await passFrequencyNudges();
     await passScheduledCalls();
     console.log("scheduler: done");

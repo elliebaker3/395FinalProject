@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL,
   phone_e164 TEXT NOT NULL UNIQUE,
   timezone TEXT NOT NULL DEFAULT 'UTC',
+  min_call_minutes INT NOT NULL DEFAULT 15 CHECK (min_call_minutes > 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -42,6 +43,31 @@ CREATE TABLE IF NOT EXISTS user_availability (
 );
 
 CREATE INDEX IF NOT EXISTS availability_user_idx ON user_availability (user_id);
+
+-- Computed weekly availability override windows (current-week materialization)
+CREATE TABLE IF NOT EXISTS user_week_availability (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  week_start_date DATE NOT NULL, -- local Sunday in user's timezone
+  day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+  start_time TIME NOT NULL,
+  end_time TIME NOT NULL,
+  CHECK (end_time > start_time)
+);
+
+CREATE INDEX IF NOT EXISTS user_week_availability_user_week_idx
+  ON user_week_availability (user_id, week_start_date);
+
+-- Server-owned Google Calendar tokens for backend refresh/sync jobs.
+-- refresh_token and access_token are encrypted with pgcrypto.
+CREATE TABLE IF NOT EXISTS user_google_tokens (
+  user_id UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  refresh_token BYTEA,
+  access_token BYTEA,
+  token_expiry TIMESTAMPTZ,
+  scope TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- Explicit recurring call schedules per contact
 CREATE TABLE IF NOT EXISTS contact_schedules (
