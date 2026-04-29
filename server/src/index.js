@@ -300,11 +300,17 @@ app.get("/users/:userId/preferences", async (req, res) => {
        ORDER BY week_start_date DESC, day_of_week, start_time`,
       [userId]
     );
+    const gcal = await pool.query(
+      `SELECT 1 AS x FROM user_google_tokens WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
     res.json({
       timezone: userRow.rows[0].timezone,
       min_call_minutes: Number(userRow.rows[0].min_call_minutes ?? 15),
       general_call_times: avail.rows,
       this_week_slots: thisWeek.rows,
+      /** True if the server can call Google (Calendar) on the user’s behalf (app re-login without device OAuth). */
+      google_calendar_linked: gcal.rowCount > 0,
       // Backward compatibility with existing mobile shape:
       availability: avail.rows,
     });

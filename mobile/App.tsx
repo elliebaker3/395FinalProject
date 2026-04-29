@@ -25,7 +25,11 @@ import {
   runSuggestFreeTimes,
 } from "./googleCalendarAvailability";
 import { getGoogleOAuthSetupHint, isExpoGoRuntime } from "./googleCalendarConfig";
-import { getValidAccessToken, hasGoogleCalendarSession } from "./googleCalendarTokens";
+import {
+  disconnectGoogleCalendar,
+  getValidAccessToken,
+  hasGoogleCalendarSession,
+} from "./googleCalendarTokens";
 import { useGoogleCalendarAuth } from "./useGoogleCalendarAuth";
 import Constants from "expo-constants";
 import { Limelight_400Regular } from "@expo-google-fonts/limelight";
@@ -335,6 +339,7 @@ export default function App() {
   }
 
   async function handleLogout() {
+    await disconnectGoogleCalendar().catch(() => {});
     await AsyncStorage.removeItem(STORAGE_KEY);
     setUser(null);
     setActiveTab("home");
@@ -2518,6 +2523,8 @@ function SettingsScreen({
   const googleAuth = useGoogleCalendarAuth({ userId: user.id, apiBase: getApiBase() });
   const [fillCalLoading, setFillCalLoading] = useState(false);
   const [fillCurrentWeekLoading, setFillCurrentWeekLoading] = useState(false);
+  /** Server has stored Google refresh token (survives log out / new device; weekly refresh can run without local OAuth). */
+  const [serverGoogleLinked, setServerGoogleLinked] = useState(false);
   const hydratedPrefsRef = useRef(false);
   const lastGeneralSigRef = useRef("");
   const lastThisWeekSigRef = useRef("");
@@ -2556,6 +2563,7 @@ function SettingsScreen({
         if (Number.isFinite(Number(data.min_call_minutes))) {
           setMinCallMinutes(Math.max(1, Number(data.min_call_minutes)));
         }
+        setServerGoogleLinked(data.google_calendar_linked === true);
         const effectiveTimezone =
           data.timezone && (!initialTimezone || initialTimezone === "UTC")
             ? data.timezone
@@ -2577,8 +2585,15 @@ function SettingsScreen({
       .finally(() => setLoadingPrefs(false));
   }, [user.id, initialTimezone]);
 
+  const googleCalReady = googleAuth.connected || serverGoogleLinked;
+  const googleStatusLabel = googleAuth.connected
+    ? "Connected"
+    : serverGoogleLinked
+      ? "Linked on server"
+      : "Not connected";
+
   useEffect(() => {
-    if (!googleAuth.connected) return;
+    if (!googleCalReady) return;
     let cancelled = false;
     (async () => {
       try {
@@ -2598,7 +2613,7 @@ function SettingsScreen({
     return () => {
       cancelled = true;
     };
-  }, [googleAuth.connected, user.id]);
+  }, [googleCalReady, user.id]);
 
   function updateDaySlot(
     mode: "general" | "thisWeek",
@@ -2799,10 +2814,10 @@ function SettingsScreen({
           <Text
             style={[
               styles.googleCalStatusText,
-              googleAuth.connected ? styles.googleCalStatusConnected : styles.googleCalStatusDisconnected,
+              googleCalReady ? styles.googleCalStatusConnected : styles.googleCalStatusDisconnected,
             ]}
           >
-            {googleAuth.connected ? "Connected" : "Not connected"}
+            {googleStatusLabel}
           </Text>
         </View>
         {!googleAuth.connected ? (
@@ -2815,6 +2830,7 @@ function SettingsScreen({
               ]}
               onPress={async () => {
                 const r = await googleAuth.connect();
+                if (r.ok) setServerGoogleLinked(true);
                 if (!r.ok && r.message) Alert.alert("Google", r.message);
               }}
               disabled={!googleAuth.canConnect}
@@ -2893,39 +2909,68 @@ function SettingsScreen({
               style={[
                 styles.primaryBtn,
                 { marginTop: 8 },
-                (fillCurrentWeekLoading || fillCalLoading || !googleAuth.connected) && styles.btnDisabled,
+                (fillCurrentWeekLoading || fillCalLoading || !googleCalReady) && styles.btnDisabled,
               ]}
               onPress={async () => {
-                const token = await getValidAccessToken();
-                if (!token) {
+                if (!googleCalReady) {
                   Alert.alert("Connect Google", "Connect your Google account first.");
                   return;
                 }
                 setFillCurrentWeekLoading(true);
                 try {
-                  const next = await fetchThisWeekSlotsFromCalendar({
-                    accessToken: token,
-                    timezone,
-                    general: generalWindows,
-                    minCallMinutes,
-                  });
-                  setThisWeekWindows(next);
-                  Alert.alert(
-                    "Current week updated",
-                    "Availability was updated using your calendar events for this week."
-                  );
-
-                  await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                  }).catch(() => {});
+                  const token = await getValidAccessToken();
+                  if (token) {
+                    const next = await fetchThisWeekSlotsFromCalendar({
+                      accessToken: token,
+                      timezone,
+                      general: generalWindows,
+                      minCallMinutes,
+                    });
+                    setThisWeekWindows(next);
+                    Alert.alert(
+                      "Current week updated",
+                      "Availability was updated using your calendar events for this week."
+                    );
+                    await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                    }).catch(() => {});
+                    return;
+                  }
+                  if (serverGoogleLinked) {
+                    const r = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                    });
+                    if (!r.ok) {
+                      let detail = "";
+                      try {
+                        const payload = await r.json();
+                        if (payload?.message) detail = String(payload.message);
+                        else if (payload?.error) detail = String(payload.error);
+                      } catch {
+                        /* ignore */
+                      }
+                      throw new Error(detail || `Server error: ${r.status}`);
+                    }
+                    const data = await r.json();
+                    if (Array.isArray(data.slots)) {
+                      setThisWeekWindows(fromAvailabilityRows(data.slots));
+                    }
+                    Alert.alert(
+                      "Current week updated",
+                      "Availability was updated using your calendar events for this week."
+                    );
+                    return;
+                  }
+                  Alert.alert("Connect Google", "Connect your Google account first.");
                 } catch (e: unknown) {
                   Alert.alert("Calendar", e instanceof Error ? e.message : "Could not read calendar.");
                 } finally {
                   setFillCurrentWeekLoading(false);
                 }
               }}
-              disabled={fillCurrentWeekLoading || fillCalLoading || !googleAuth.connected}
+              disabled={fillCurrentWeekLoading || fillCalLoading || !googleCalReady}
             >
               <ButtonLabel style={styles.primaryBtnText}>
                 {fillCurrentWeekLoading ? "Loading…" : "Update availability for current week"}
