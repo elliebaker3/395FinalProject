@@ -28,6 +28,7 @@ export async function sendNudge(device, payload) {
         title: payload.title,
         body: payload.body,
         data: payload.data,
+        channelId: "default",
       },
     ]);
     for (const chunk of chunks) {

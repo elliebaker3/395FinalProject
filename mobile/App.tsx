@@ -104,6 +104,15 @@ Notifications.setNotificationHandler({
   }),
 });
 
+if (Platform.OS === "android") {
+  Notifications.setNotificationChannelAsync("default", {
+    name: "CallWizard",
+    importance: Notifications.AndroidImportance.MAX,
+    vibrationPattern: [0, 250, 250, 250],
+    lightColor: "#7c3aed",
+  });
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function getApiBase(): string {
