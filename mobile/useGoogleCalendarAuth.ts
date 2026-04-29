@@ -19,10 +19,34 @@ import type { TokenResponse } from "expo-auth-session";
 
 WebBrowser.maybeCompleteAuthSession();
 
+/**
+ * expo-auth-session's Google provider throws on iOS/Android if the platform's
+ * client id field is undefined. We only need a string to mount the hook; real
+ * OAuth is still blocked by isGoogleOAuthConfiguredForPlatform() / canConnect.
+ */
+const GOOGLE_AUTH_CLIENT_ID_PLACEHOLDER = "0.apps.googleusercontent.com";
+
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
 /** Lets Google issue a refresh token for PKCE / Calendar API (requires offline when exchanging). */
 const OFFLINE_ACCESS_EXTRA = { access_type: "offline" as const };
+
+function withRequiredPlatformGoogleClientIds<
+  T extends {
+    webClientId?: string;
+    iosClientId?: string;
+    androidClientId?: string;
+  },
+>(config: T): T {
+  const next = { ...config };
+  if (Platform.OS === "ios" && next.iosClientId === undefined) {
+    next.iosClientId = next.webClientId ?? GOOGLE_AUTH_CLIENT_ID_PLACEHOLDER;
+  }
+  if (Platform.OS === "android" && next.androidClientId === undefined) {
+    next.androidClientId = next.webClientId ?? GOOGLE_AUTH_CLIENT_ID_PLACEHOLDER;
+  }
+  return next;
+}
 
 /**
  * Expo Go uses redirect URIs like exp://192.168.x.x:8081, which Google OAuth does not allow
@@ -35,8 +59,17 @@ function useGoogleAuthRequestConfig() {
   return useMemo(() => {
     const proxyRedirect = getAuthExpoProxyRedirectUri();
 
+    let raw: {
+      webClientId?: string;
+      iosClientId?: string;
+      androidClientId?: string;
+      redirectUri?: string;
+      scopes: string[];
+      extraParams: typeof OFFLINE_ACCESS_EXTRA;
+    };
+
     if (isExpoGoRuntime() && proxyRedirect && web) {
-      return {
+      raw = {
         webClientId: web,
         iosClientId: web,
         androidClientId: web,
@@ -44,12 +77,10 @@ function useGoogleAuthRequestConfig() {
         scopes: [CALENDAR_SCOPE],
         extraParams: OFFLINE_ACCESS_EXTRA,
       };
-    }
-
-    if (Platform.OS === "ios" && ios) {
+    } else if (Platform.OS === "ios" && ios) {
       const nativeRedirect = iosGoogleOAuthRedirectUri(ios);
       if (nativeRedirect) {
-        return {
+        raw = {
           webClientId: web || undefined,
           iosClientId: ios,
           androidClientId: android || undefined,
@@ -57,16 +88,26 @@ function useGoogleAuthRequestConfig() {
           scopes: [CALENDAR_SCOPE],
           extraParams: OFFLINE_ACCESS_EXTRA,
         };
+      } else {
+        raw = {
+          webClientId: web || undefined,
+          iosClientId: ios || undefined,
+          androidClientId: android || undefined,
+          scopes: [CALENDAR_SCOPE],
+          extraParams: OFFLINE_ACCESS_EXTRA,
+        };
       }
+    } else {
+      raw = {
+        webClientId: web || undefined,
+        iosClientId: ios || undefined,
+        androidClientId: android || undefined,
+        scopes: [CALENDAR_SCOPE],
+        extraParams: OFFLINE_ACCESS_EXTRA,
+      };
     }
 
-    return {
-      webClientId: web || undefined,
-      iosClientId: ios || undefined,
-      androidClientId: android || undefined,
-      scopes: [CALENDAR_SCOPE],
-      extraParams: OFFLINE_ACCESS_EXTRA,
-    };
+    return withRequiredPlatformGoogleClientIds(raw);
   }, [ios, android, web]);
 }
 
