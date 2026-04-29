@@ -389,6 +389,96 @@ function instantInBusy(dt: DateTime, busy: UtcInterval[]): boolean {
   return false;
 }
 
+/** Google Calendar `events.list` item (subset). */
+type GCalListEvent = {
+  summary?: string;
+  transparency?: string;
+  start?: { dateTime?: string; date?: string; timeZone?: string };
+  end?: { dateTime?: string; date?: string; timeZone?: string };
+};
+
+function eventAffectsAvailability(ev: GCalListEvent): boolean {
+  return ev.transparency !== "transparent";
+}
+
+function googleEventIntervalUtc(ev: GCalListEvent, userZone: string): { start: DateTime; end: DateTime } | null {
+  if (ev.start?.dateTime) {
+    const s = DateTime.fromISO(ev.start.dateTime, { setZone: true });
+    const endRaw = ev.end?.dateTime;
+    if (!endRaw) return null;
+    const e = DateTime.fromISO(endRaw, { setZone: true });
+    if (!s.isValid || !e.isValid || e <= s) return null;
+    return { start: s.toUTC(), end: e.toUTC() };
+  }
+  if (ev.start?.date) {
+    const s = DateTime.fromISO(ev.start.date, { zone: userZone }).startOf("day");
+    const endDateStr = ev.end?.date ?? ev.start.date;
+    const e = DateTime.fromISO(endDateStr, { zone: userZone }).startOf("day");
+    if (!s.isValid || !e.isValid) return null;
+    return { start: s.toUTC(), end: e.toUTC() };
+  }
+  return null;
+}
+
+function instantInIntervalUtc(instUtc: DateTime, iv: { start: DateTime; end: DateTime }): boolean {
+  const t = instUtc.toMillis();
+  return t >= iv.start.toMillis() && t < iv.end.toMillis();
+}
+
+async function fetchPrimaryCalendarEventsInRange(
+  accessToken: string,
+  timeMinIso: string,
+  timeMaxIso: string
+): Promise<GCalListEvent[]> {
+  const out: GCalListEvent[] = [];
+  let pageToken: string | undefined;
+  do {
+    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+    url.searchParams.set("timeMin", timeMinIso);
+    url.searchParams.set("timeMax", timeMaxIso);
+    url.searchParams.set("maxResults", "250");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Calendar events list failed (${res.status}): ${t.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as { items?: GCalListEvent[]; nextPageToken?: string };
+    out.push(...(data.items ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+/** Summary of the earliest-starting calendar block at `inst` in `userZone`, or a generic label. */
+async function findEventSummaryAtInstant(
+  accessToken: string,
+  inst: DateTime,
+  userZone: string
+): Promise<string> {
+  const local = inst.setZone(userZone);
+  const dayStart = local.startOf("day");
+  const dayEnd = dayStart.plus({ days: 1 });
+  const timeMin = dayStart.toUTC().toISO()!;
+  const timeMax = dayEnd.toUTC().toISO()!;
+  const events = await fetchPrimaryCalendarEventsInRange(accessToken, timeMin, timeMax);
+  const instUtc = inst.toUTC();
+  const matches: { startMs: number; summary: string }[] = [];
+  for (const ev of events) {
+    if (!eventAffectsAvailability(ev)) continue;
+    const iv = googleEventIntervalUtc(ev, userZone);
+    if (!iv || !instantInIntervalUtc(instUtc, iv)) continue;
+    const summary = ev.summary?.trim() || "Busy";
+    matches.push({ startMs: iv.start.toMillis(), summary });
+  }
+  matches.sort((a, b) => a.startMs - b.startMs);
+  return matches[0]?.summary ?? "Calendar busy";
+}
+
 export function nextOccurrenceDates(params: {
   timezone: string;
   recurrence: CalendarRecurrence;
@@ -462,6 +552,64 @@ export function checkScheduleConflictsWithBusy(params: {
   return false;
 }
 
+export type ScheduleConflictResult = {
+  conflict: boolean;
+  /** Local full date of the first conflicting scheduled occurrence. */
+  overlapDateLabel?: string;
+  /** Title of a calendar event covering that time (or a fallback label). */
+  overlapEventTitle?: string;
+};
+
+/**
+ * Like FreeBusy conflict check, but for the first upcoming conflicting occurrence fetches
+ * `events.list` to resolve the overlapping event name for the warning UI.
+ */
+export async function runScheduleConflictCheckWithDetails(params: {
+  accessToken: string;
+  timezone: string;
+  recurrence: CalendarRecurrence;
+  dayOfWeek: number;
+  dayOfMonth: number;
+  schedTime: string;
+}): Promise<ScheduleConflictResult> {
+  const zone = params.timezone || "UTC";
+  const now = DateTime.now().setZone(zone);
+  const timeMin = now.toUTC().toISO()!;
+  const timeMax = now.plus({ days: 56 }).toUTC().toISO()!;
+  const { busy } = await fetchPrimaryCalendarFreeBusy(params.accessToken, timeMin, timeMax);
+  const merged = mergedBusyIntervalsUtc(busy);
+
+  const n = 3;
+  const dates = nextOccurrenceDates({
+    timezone: zone,
+    recurrence: params.recurrence,
+    dayOfWeek: params.dayOfWeek,
+    dayOfMonth: params.dayOfMonth,
+    count: n,
+  });
+
+  for (const d of dates) {
+    const inst = scheduleInstantForDate(d, params.schedTime);
+    if (!inst) continue;
+    if (!instantInBusy(inst, merged)) continue;
+
+    const overlapDateLabel = inst.setZone(zone).toLocaleString(DateTime.DATE_FULL);
+    let overlapEventTitle = "Calendar busy";
+    try {
+      overlapEventTitle = await findEventSummaryAtInstant(params.accessToken, inst, zone);
+    } catch {
+      /* keep fallback */
+    }
+    return {
+      conflict: true,
+      overlapDateLabel,
+      overlapEventTitle,
+    };
+  }
+
+  return { conflict: false };
+}
+
 /** Find up to `maxSuggestions` free slots on the same weekday in `band`, stepping `stepMinutes`. */
 export async function runScheduleConflictCheck(params: {
   accessToken: string;
@@ -471,20 +619,8 @@ export async function runScheduleConflictCheck(params: {
   dayOfMonth: number;
   schedTime: string;
 }): Promise<boolean> {
-  const zone = params.timezone || "UTC";
-  const now = DateTime.now().setZone(zone);
-  const timeMin = now.toUTC().toISO()!;
-  const timeMax = now.plus({ days: 56 }).toUTC().toISO()!;
-  const { busy } = await fetchPrimaryCalendarFreeBusy(params.accessToken, timeMin, timeMax);
-  const merged = mergedBusyIntervalsUtc(busy);
-  return checkScheduleConflictsWithBusy({
-    busyMerged: merged,
-    timezone: zone,
-    recurrence: params.recurrence,
-    dayOfWeek: params.dayOfWeek,
-    dayOfMonth: params.dayOfMonth,
-    schedTime: params.schedTime,
-  });
+  const r = await runScheduleConflictCheckWithDetails(params);
+  return r.conflict;
 }
 
 export async function runSuggestFreeTimes(params: {

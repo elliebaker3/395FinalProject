@@ -29,20 +29,80 @@ async function persistRefreshed(tr: TokenResponse): Promise<void> {
 /** Returns a usable Calendar API access token, refreshing when needed. */
 export async function getValidAccessToken(): Promise<string | null> {
   const { web } = getGoogleClientIds();
-  if (!web) return null;
+  if (!web) {
+    // #region agent log
+    fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+      body: JSON.stringify({
+        sessionId: "3cba6c",
+        location: "googleCalendarTokens.ts:getValidAccessToken",
+        message: "exit no web client id",
+        data: { hypothesisId: "C", reason: "noWebClientId" },
+        timestamp: Date.now(),
+        runId: "pre-fix",
+      }),
+    }).catch(() => {});
+    // #endregion
+    return null;
+  }
 
   let tr = await loadTokenResponse();
-  if (!tr) return null;
+  if (!tr) {
+    // #region agent log
+    fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+      body: JSON.stringify({
+        sessionId: "3cba6c",
+        location: "googleCalendarTokens.ts:getValidAccessToken",
+        message: "exit no stored token",
+        data: { hypothesisId: "C", reason: "noStoredToken" },
+        timestamp: Date.now(),
+        runId: "pre-fix",
+      }),
+    }).catch(() => {});
+    // #endregion
+    return null;
+  }
 
   if (tr.shouldRefresh() && tr.refreshToken) {
     try {
       tr = await tr.refreshAsync({ clientId: web }, Google.discovery);
       await persistRefreshed(tr);
     } catch {
+      // #region agent log
+      fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+        body: JSON.stringify({
+          sessionId: "3cba6c",
+          location: "googleCalendarTokens.ts:getValidAccessToken",
+          message: "refresh failed",
+          data: { hypothesisId: "C", reason: "refreshFailed" },
+          timestamp: Date.now(),
+          runId: "pre-fix",
+        }),
+      }).catch(() => {});
+      // #endregion
       return null;
     }
   }
 
+  // #region agent log
+  fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+    body: JSON.stringify({
+      sessionId: "3cba6c",
+      location: "googleCalendarTokens.ts:getValidAccessToken",
+      message: "returning access token",
+      data: { hypothesisId: "C", reason: "ok" },
+      timestamp: Date.now(),
+      runId: "pre-fix",
+    }),
+  }).catch(() => {});
+  // #endregion
   return tr.accessToken;
 }
 

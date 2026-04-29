@@ -1081,7 +1081,7 @@ function HomeScreen({
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
       <Text style={styles.greeting}>Hello, {user.display_name}</Text>
 
-      <Text style={styles.sectionTitle}>Last Called</Text>
+      <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Last Called</Text>
       {loading ? (
         <ActivityIndicator color={PURPLE} style={styles.loader} />
       ) : recentlyCalledContact ? (
@@ -1837,147 +1837,9 @@ function ScheduleScreen({
   const selectedContact = contacts.find((c) => c.id === selContactId);
   const detailSchedules = schedules.filter((s) => s.contact_id === activeContactId);
   const currentDetailContact = contactDetail?.contact ?? contacts.find((c) => c.id === activeContactId);
-
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
-      <Text style={styles.greeting}>
-        {activeContactId ? currentDetailContact?.name ?? "Contact Details" : "Scheduled Calls"}
-      </Text>
-
-      {activeContactId ? (
-        <Pressable
-          style={[styles.outlineBtn, { marginTop: 8 }]}
-          onPress={() => {
-            setActiveContactId(null);
-            setContactDetail(null);
-            setShowForm(false);
-            setEditingScheduleId(null);
-          }}
-        >
-          <ButtonLabel style={styles.outlineBtnText}>Back to all schedules</ButtonLabel>
-        </Pressable>
-      ) : null}
-
-      {loading ? (
-        <ActivityIndicator color={PURPLE} style={styles.loader} />
-      ) : activeContactId ? (
-        detailLoading ? (
-          <ActivityIndicator color={PURPLE} style={styles.loader} />
-        ) : (
-          <>
-            <View style={styles.card}>
-              <Text style={styles.cardName}>{currentDetailContact?.name ?? "Unknown contact"}</Text>
-              <Text style={styles.cardPhone}>
-                {currentDetailContact?.phone_e164
-                  ? formatPhoneDisplay(currentDetailContact.phone_e164)
-                  : "No phone number"}
-              </Text>
-            </View>
-
-            <Text style={styles.sectionTitle}>Past Call History</Text>
-            <View style={styles.card}>
-              {contactDetail?.call_history?.length ? (
-                contactDetail.call_history.map((item, idx) => (
-                  <Text key={`${item.at}-${idx}`} style={styles.scheduleDetail}>
-                    {item.type === "called" ? "Called" : "Event"} · {new Date(item.at).toLocaleString()}
-                  </Text>
-                ))
-              ) : (
-                <Text style={styles.emptyText}>No call history yet.</Text>
-              )}
-            </View>
-
-            <Text style={styles.sectionTitle}>Notes</Text>
-            <View style={styles.card}>
-              <TextInput
-                style={[styles.input, { minHeight: 100, textAlignVertical: "top" }]}
-                multiline
-                value={notesDraft}
-                onChangeText={setNotesDraft}
-                placeholder="Add notes for this contact..."
-                returnKeyType="done"
-                blurOnSubmit
-                onSubmitEditing={() => Keyboard.dismiss()}
-              />
-              {notesSaving ? (
-                <Text style={styles.notesMetaText}>Saving...</Text>
-              ) : notesLastSavedAt ? (
-                <Text style={styles.notesMetaText}>
-                  Last Saved at{" "}
-                  {new Date(notesLastSavedAt).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </Text>
-              ) : null}
-            </View>
-
-            <Text style={styles.sectionTitle}>Scheduled Calls</Text>
-            {detailSchedules.length === 0 && !showForm ? (
-              <View style={styles.card}>
-                <Text style={styles.emptyText}>No schedules for this contact yet.</Text>
-              </View>
-            ) : (
-              detailSchedules.map((s) => (
-                <Pressable key={s.id} style={styles.scheduleRow} onPress={() => startEditSchedule(s)}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.cardName}>{scheduleLabel(s)}</Text>
-                  </View>
-                  <Pressable
-                    style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
-                    onPress={() => startEditSchedule(s)}
-                  >
-                    <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
-                  </Pressable>
-                  <Pressable
-                    style={styles.deleteBtn}
-                    onPress={() =>
-                      Alert.alert("Delete Schedule", "Remove this scheduled call?", [
-                        { text: "Cancel", style: "cancel" },
-                        { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
-                      ])
-                    }
-                  >
-                    <Text style={styles.deleteBtnText}>✕</Text>
-                  </Pressable>
-                </Pressable>
-              ))
-            )}
-          </>
-        )
-      ) : schedules.length === 0 && !showForm ? (
-        <View style={styles.card}>
-          <Text style={styles.emptyText}>No scheduled calls yet</Text>
-        </View>
-      ) : (
-        schedules.map((s) => (
-          <Pressable key={s.id} style={styles.scheduleRow} onPress={() => openContactDetail(s.contact_id)}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardName}>{s.contact_name}</Text>
-              <Text style={styles.scheduleDetail}>{scheduleLabel(s)}</Text>
-            </View>
-            <Pressable
-              style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
-              onPress={() => openContactDetail(s.contact_id)}
-            >
-              <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
-            </Pressable>
-            <Pressable
-              style={styles.deleteBtn}
-              onPress={() =>
-                Alert.alert("Delete Schedule", `Remove reminder to call ${s.contact_name}?`, [
-                  { text: "Cancel", style: "cancel" },
-                  { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
-                ])
-              }
-            >
-              <Text style={styles.deleteBtnText}>✕</Text>
-            </Pressable>
-          </Pressable>
-        ))
-      )}
-
-      {showForm ? (
+  function scheduleFormOrAdd() {
+    if (showForm) {
+      return (
         <View style={[styles.card, { marginTop: 16 }]}>
           <Text style={styles.sectionTitle}>
             {editingScheduleId ? "Edit Scheduled Call" : "New Scheduled Call"}
@@ -2178,7 +2040,9 @@ function ScheduleScreen({
             </Pressable>
           </View>
         </View>
-      ) : (
+      );
+    }
+    return (
         <Pressable
           style={[styles.primaryBtn, { marginTop: 16 }]}
           onPress={() => {
@@ -2192,7 +2056,152 @@ function ScheduleScreen({
         >
           <ButtonLabel style={styles.primaryBtnText}>+ Add Scheduled Call</ButtonLabel>
         </Pressable>
+    );
+  }
+
+
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
+      <Text style={[styles.greeting, { marginBottom: 6 }]}>
+        {activeContactId ? currentDetailContact?.name ?? "Contact Details" : "Scheduled Calls"}
+      </Text>
+
+      {activeContactId ? (
+        <Pressable
+          style={[styles.outlineBtn, { marginTop: 4 }]}
+          onPress={() => {
+            setActiveContactId(null);
+            setContactDetail(null);
+            setShowForm(false);
+            setEditingScheduleId(null);
+          }}
+        >
+          <ButtonLabel style={styles.outlineBtnText}>Back to all schedules</ButtonLabel>
+        </Pressable>
+      ) : null}
+
+      {loading ? (
+        <ActivityIndicator color={PURPLE} style={{ marginTop: 4, marginBottom: 12 }} />
+      ) : activeContactId ? (
+        detailLoading ? (
+          <ActivityIndicator color={PURPLE} style={{ marginTop: 4, marginBottom: 12 }} />
+        ) : (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.cardName}>{currentDetailContact?.name ?? "Unknown contact"}</Text>
+              <Text style={styles.cardPhone}>
+                {currentDetailContact?.phone_e164
+                  ? formatPhoneDisplay(currentDetailContact.phone_e164)
+                  : "No phone number"}
+              </Text>
+            </View>
+
+            <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Scheduled Calls</Text>
+            {detailSchedules.length === 0 && !showForm ? (
+              <View style={styles.card}>
+                <Text style={styles.emptyText}>No schedules for this contact yet.</Text>
+              </View>
+            ) : (
+              detailSchedules.map((s) => (
+                <Pressable key={s.id} style={styles.scheduleRow} onPress={() => startEditSchedule(s)}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.cardName}>{scheduleLabel(s)}</Text>
+                  </View>
+                  <Pressable
+                    style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
+                    onPress={() => startEditSchedule(s)}
+                  >
+                    <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
+                  </Pressable>
+                  <Pressable
+                    style={styles.deleteBtn}
+                    onPress={() =>
+                      Alert.alert("Delete Schedule", "Remove this scheduled call?", [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
+                      ])
+                    }
+                  >
+                    <Text style={styles.deleteBtnText}>✕</Text>
+                  </Pressable>
+                </Pressable>
+              ))
+            )}
+
+            {scheduleFormOrAdd()}
+
+            <Text style={styles.sectionTitle}>Past Call History</Text>
+            <View style={styles.card}>
+              {contactDetail?.call_history?.length ? (
+                contactDetail.call_history.map((item, idx) => (
+                  <Text key={`${item.at}-${idx}`} style={styles.scheduleDetail}>
+                    {item.type === "called" ? "Called" : "Event"} · {new Date(item.at).toLocaleString()}
+                  </Text>
+                ))
+              ) : (
+                <Text style={styles.emptyText}>No call history yet.</Text>
+              )}
+            </View>
+
+            <Text style={styles.sectionTitle}>Notes</Text>
+            <View style={styles.card}>
+              <TextInput
+                style={[styles.input, { minHeight: 100, textAlignVertical: "top" }]}
+                multiline
+                value={notesDraft}
+                onChangeText={setNotesDraft}
+                placeholder="Add notes for this contact..."
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={() => Keyboard.dismiss()}
+              />
+              {notesSaving ? (
+                <Text style={styles.notesMetaText}>Saving...</Text>
+              ) : notesLastSavedAt ? (
+                <Text style={styles.notesMetaText}>
+                  Last Saved at{" "}
+                  {new Date(notesLastSavedAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </Text>
+              ) : null}
+            </View>
+          </>
+        )
+      ) : schedules.length === 0 && !showForm ? (
+        <View style={styles.card}>
+          <Text style={styles.emptyText}>No scheduled calls yet</Text>
+        </View>
+      ) : (
+        schedules.map((s) => (
+          <Pressable key={s.id} style={styles.scheduleRow} onPress={() => openContactDetail(s.contact_id)}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardName}>{s.contact_name}</Text>
+              <Text style={styles.scheduleDetail}>{scheduleLabel(s)}</Text>
+            </View>
+            <Pressable
+              style={[styles.outlineBtn, { marginTop: 0, marginRight: 8, paddingVertical: 8, paddingHorizontal: 12 }]}
+              onPress={() => openContactDetail(s.contact_id)}
+            >
+              <ButtonLabel style={styles.outlineBtnText}>Edit</ButtonLabel>
+            </Pressable>
+            <Pressable
+              style={styles.deleteBtn}
+              onPress={() =>
+                Alert.alert("Delete Schedule", `Remove reminder to call ${s.contact_name}?`, [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive", onPress: () => deleteSchedule(s.id) },
+                ])
+              }
+            >
+              <Text style={styles.deleteBtnText}>✕</Text>
+            </Pressable>
+          </Pressable>
+        ))
       )}
+
+      {(detailLoading || !activeContactId) && scheduleFormOrAdd()}
 
       <TimePickerModal
         visible={pickerVisible}
@@ -2544,7 +2553,23 @@ function SettingsScreen({
 
   useEffect(() => {
     fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`)
-      .then((r) => r.json())
+      .then((r) => {
+        // #region agent log
+        fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+          body: JSON.stringify({
+            sessionId: "3cba6c",
+            location: "App.tsx:preferences",
+            message: "preferences response",
+            data: { hypothesisId: "B", ok: r.ok, status: r.status },
+            timestamp: Date.now(),
+            runId: "pre-fix",
+          }),
+        }).catch(() => {});
+        // #endregion
+        return r.json();
+      })
       .then((data) => {
         // Only hydrate from server when app-level timezone has not been
         // explicitly set by the user in this session.
@@ -2573,6 +2598,23 @@ function SettingsScreen({
           setMinCallMinutes(Math.max(1, Number(data.min_call_minutes)));
         }
         setServerGoogleLinked(data.google_calendar_linked === true);
+        // #region agent log
+        fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+          body: JSON.stringify({
+            sessionId: "3cba6c",
+            location: "App.tsx:preferences",
+            message: "preferences google flag",
+            data: {
+              hypothesisId: "E",
+              google_calendar_linked: data.google_calendar_linked === true,
+            },
+            timestamp: Date.now(),
+            runId: "pre-fix",
+          }),
+        }).catch(() => {});
+        // #endregion
         const effectiveTimezone =
           data.timezone && (!initialTimezone || initialTimezone === "UTC")
             ? data.timezone
@@ -2590,7 +2632,22 @@ function SettingsScreen({
         });
         hydratedPrefsRef.current = true;
       })
-      .catch(() => {})
+      .catch(() => {
+        // #region agent log
+        fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+          body: JSON.stringify({
+            sessionId: "3cba6c",
+            location: "App.tsx:preferences",
+            message: "preferences fetch rejected",
+            data: { hypothesisId: "B", reason: "catch" },
+            timestamp: Date.now(),
+            runId: "pre-fix",
+          }),
+        }).catch(() => {});
+        // #endregion
+      })
       .finally(() => setLoadingPrefs(false));
   }, [user.id, initialTimezone]);
 
@@ -2600,6 +2657,28 @@ function SettingsScreen({
     : serverGoogleLinked
       ? "Linked on server"
       : "Not connected";
+
+  useEffect(() => {
+    // #region agent log
+    fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+      body: JSON.stringify({
+        sessionId: "3cba6c",
+        location: "App.tsx:googleCalReady",
+        message: "google readiness snapshot",
+        data: {
+          hypothesisId: "A",
+          googleCalReady,
+          googleConnected: googleAuth.connected,
+          serverGoogleLinked,
+        },
+        timestamp: Date.now(),
+        runId: "pre-fix",
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [googleCalReady, googleAuth.connected, serverGoogleLinked]);
 
   useEffect(() => {
     if (!googleCalReady) return;
@@ -2806,7 +2885,7 @@ function SettingsScreen({
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
       <Text style={styles.greeting}>Settings</Text>
 
-      <Text style={styles.sectionTitle}>Calling Availability</Text>
+      <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Calling Availability</Text>
       <Text style={styles.availHint}>
         Nudges are only sent during the times you mark as available. Leave all days off to
         receive nudges at any time.
@@ -2922,12 +3001,50 @@ function SettingsScreen({
               ]}
               onPress={async () => {
                 if (!googleCalReady) {
+                  // #region agent log
+                  fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+                    body: JSON.stringify({
+                      sessionId: "3cba6c",
+                      location: "App.tsx:updateWeek",
+                      message: "alert branch",
+                      data: {
+                        hypothesisId: "A",
+                        branch: "not_googleCalReady",
+                        googleConnected: googleAuth.connected,
+                        serverGoogleLinked,
+                      },
+                      timestamp: Date.now(),
+                      runId: "pre-fix",
+                    }),
+                  }).catch(() => {});
+                  // #endregion
                   Alert.alert("Connect Google", "Connect your Google account first.");
                   return;
                 }
                 setFillCurrentWeekLoading(true);
                 try {
                   const token = await getValidAccessToken();
+                  // #region agent log
+                  fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+                    body: JSON.stringify({
+                      sessionId: "3cba6c",
+                      location: "App.tsx:updateWeek",
+                      message: "after getValidAccessToken",
+                      data: {
+                        hypothesisId: "D",
+                        hasToken: Boolean(token),
+                        serverGoogleLinked,
+                        googleCalReady,
+                      },
+                      timestamp: Date.now(),
+                      runId: "pre-fix",
+                    }),
+                  }).catch(() => {});
+                  // #endregion
                   if (token) {
                     const next = await fetchThisWeekSlotsFromCalendar({
                       accessToken: token,
@@ -2972,6 +3089,25 @@ function SettingsScreen({
                     );
                     return;
                   }
+                  // #region agent log
+                  fetch("http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3cba6c" },
+                    body: JSON.stringify({
+                      sessionId: "3cba6c",
+                      location: "App.tsx:updateWeek",
+                      message: "alert branch",
+                      data: {
+                        hypothesisId: "D",
+                        branch: "no_token_no_server",
+                        serverGoogleLinked,
+                        googleConnected: googleAuth.connected,
+                      },
+                      timestamp: Date.now(),
+                      runId: "pre-fix",
+                    }),
+                  }).catch(() => {});
+                  // #endregion
                   Alert.alert("Connect Google", "Connect your Google account first.");
                 } catch (e: unknown) {
                   Alert.alert("Calendar", e instanceof Error ? e.message : "Could not read calendar.");
@@ -3222,7 +3358,7 @@ const styles = StyleSheet.create({
   greeting: {
     fontFamily: GREETING_FONT_FAMILY,
     fontSize: 24,
-    marginBottom: 8,
+    marginBottom: 10,
     marginTop: Platform.OS === "ios" ? 52 : 24,
     color: "#111",
   },
