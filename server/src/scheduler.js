@@ -49,9 +49,9 @@ async function inActiveAvailabilityWindow(userId, timezone) {
        (SELECT in_general FROM active_general) AS in_general`,
     [userId, timezone]
   );
+
   const row = r.rows[0];
-  if (row.has_week) return row.in_week;
-  if (row.has_general) return row.in_general;
+  if (row.has_week || row.has_general) return row.in_week || row.in_general;
   return true;
 }
 
