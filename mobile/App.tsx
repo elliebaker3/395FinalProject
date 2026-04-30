@@ -469,7 +469,7 @@ export default function App() {
                   style={[styles.callMainBtn, { backgroundColor: "#ff3b30" }]}
                   onPress={() => setIncomingCall(null)}
                 >
-                  <Text style={styles.callMainBtnIcon}>📵</Text>
+                  <Ionicons name="close" size={32} color="#fff" style={styles.callMainBtnIcon} />
                 </Pressable>
                 <Text style={styles.callMainLabel}>Decline</Text>
               </View>
@@ -481,7 +481,7 @@ export default function App() {
                     setIncomingCall(null);
                   }}
                 >
-                  <Text style={styles.callMainBtnIcon}>📞</Text>
+                  <Ionicons name="call" size={32} color="#fff" style={styles.callMainBtnIcon} />
                 </Pressable>
                 <Text style={styles.callMainLabel}>Accept</Text>
               </View>
@@ -2938,12 +2938,6 @@ function SettingsScreen({
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
       <Text style={styles.greeting}>Settings</Text>
 
-      <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Calling Availability</Text>
-      <Text style={styles.availHint}>
-        Nudges are only sent during the times you mark as available. Leave all days off to
-        receive nudges at any time.
-      </Text>
-
       <View style={styles.card}>
         <View style={styles.googleCalHeaderRow}>
           <View style={styles.googleCalTitleRow}>
@@ -3016,7 +3010,7 @@ function SettingsScreen({
           <View style={[styles.card, { marginTop: 14 }]}>
             <Text style={[styles.sectionTitle, { marginTop: 2, marginBottom: 4 }]}>This Week</Text>
             <Text style={styles.availHint}>
-              Derived from General Call Times and your Google Calendar events for this Sunday-Saturday week.
+              Overlaps your General Call Availability with your Google Calendar events for this Sunday-Saturday week.
             </Text>
             {DAYS.map((label, dow) => (
               <View key={`week-${dow}`} style={styles.dayRow}>
@@ -3184,15 +3178,13 @@ function SettingsScreen({
           </View>
 
           <View style={[styles.card, { marginTop: 14 }]}>
-            <Text style={[styles.sectionTitle, { marginTop: 2, marginBottom: 4 }]}>General Call Times</Text>
-            <Text style={styles.settingsLabel}>TIMEZONE</Text>
-            <TimezoneDropdown
-              value={timezone}
-              onChange={(next) => {
-                setTimezone(next);
-                onTimezoneChange(next);
-              }}
-            />
+            <Text style={[styles.sectionTitle, { marginTop: 2, marginBottom: 4 }]}>
+              General Calling Availability
+            </Text>
+            <Text style={styles.availHint}>
+              Nudges are only sent during the times you mark as available. Set your general
+              availability below.
+            </Text>
             <Text style={styles.settingsLabel}>MINIMUM CALL TIME (MINUTES)</Text>
             <TextInput
               style={[styles.timeInput, { width: 120, marginTop: 6 }]}
@@ -3200,7 +3192,7 @@ function SettingsScreen({
               value={String(minCallMinutes)}
               onChangeText={(txt) => setMinCallMinutes(Math.max(1, parseInt(txt || "0", 10) || 1))}
             />
-            <Text style={styles.settingsLabel}>GENERAL CALL TIMES</Text>
+            <Text style={styles.settingsLabel}>GENERAL CALL AVAILABILITY</Text>
             {DAYS.map((label, dow) => (
               <View key={`gen-${dow}`} style={styles.dayRow}>
                 <Pressable
@@ -3315,6 +3307,14 @@ function SettingsScreen({
         <Text style={styles.settingsValue}>{user.display_name}</Text>
         <Text style={styles.settingsLabel}>PHONE</Text>
         <Text style={styles.settingsValue}>{formatPhoneDisplay(user.phone_e164)}</Text>
+        <Text style={styles.settingsLabel}>TIMEZONE</Text>
+        <TimezoneDropdown
+          value={timezone}
+          onChange={(next) => {
+            setTimezone(next);
+            onTimezoneChange(next);
+          }}
+        />
       </View>
 
       <Pressable style={styles.logoutBtn} onPress={confirmLogout}>
