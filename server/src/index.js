@@ -132,6 +132,26 @@ app.post("/users", async (req, res) => {
   }
 });
 
+app.post("/auth/login", async (req, res) => {
+  const { phoneE164 } = req.body ?? {};
+  if (!phoneE164) {
+    return res.status(400).json({ error: "phoneE164 required" });
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, display_name, phone_e164 FROM users WHERE phone_e164 = $1`,
+      [phoneE164]
+    );
+    if (!r.rows[0]) {
+      return res.status(404).json({ error: "account_not_found" });
+    }
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
 app.post("/users/:userId/device-token", async (req, res) => {
   const { userId } = req.params;
   const { expoPushToken, fcmToken } = req.body ?? {};

@@ -14,6 +14,8 @@ import {
   Text,
   TextInput,
   View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   type StyleProp,
   type TextStyle,
 } from "react-native";
@@ -209,6 +211,21 @@ async function apiUpsertUser(displayName: string, phoneE164: string): Promise<Us
   return res.json();
 }
 
+async function apiLoginUser(phoneE164: string): Promise<User> {
+  const res = await fetchWithTimeout(`${getApiBase()}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phoneE164 }),
+  });
+  if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error("account_not_found");
+    }
+    throw new Error(`Server error: ${res.status}`);
+  }
+  return res.json();
+}
+
 async function apiFetchContacts(userId: string): Promise<Contact[]> {
   const res = await fetchWithTimeout(`${getApiBase()}/users/${userId}/contacts`);
   if (!res.ok) throw new Error(`Server error: ${res.status}`);
@@ -319,12 +336,27 @@ export default function App() {
     registerPushToken(user.id);
   }, [user?.id]);
 
-  async function handleLogin(displayName: string, phoneE164: string) {
-    const u = await apiUpsertUser(displayName, phoneE164);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(u));
-    setUser(u);
-    await Contacts.requestPermissionsAsync();
-    setScreen("app");
+  async function handleLogin(_displayName: string, phoneE164: string) {
+    try {
+      const u = await apiLoginUser(phoneE164);
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(u));
+      setUser(u);
+      await Contacts.requestPermissionsAsync();
+      setScreen("app");
+    } catch (e: unknown) {
+      if (e instanceof Error && e.message === "account_not_found") {
+        Alert.alert(
+          "Login failed",
+          "No account exists for this number",
+          [
+            { text: "Sign Up", onPress: () => setScreen("signup") },
+            { text: "Try Again", style: "cancel" },
+          ]
+        );
+        return;
+      }
+      throw e;
+    }
   }
 
   async function handleSignup(displayName: string, phoneE164: string) {
@@ -1016,7 +1048,9 @@ function SignUpScreen({
     <View style={styles.authContainer}>
       <StatusBar style="dark" />
       <Text style={styles.appTitle}>Create Account</Text>
-      <Text style={styles.appSubtitle}>Join CallWizard to stay in touch</Text>
+      <Text style={[styles.appSubtitle, styles.appSubtitleItalic]}>
+        Join CallWizard to stay in touch
+      </Text>
       <Text style={styles.fieldLabel}>Name</Text>
       <TextInput
         style={styles.input}
@@ -1367,6 +1401,16 @@ function TimezoneDropdown({
   );
 }
 
+/** Slow drags often never trigger onMomentumScrollEnd; snap on drag end unless user flung. */
+function snapPickerAfterScrollDrag(
+  e: NativeSyntheticEvent<NativeScrollEvent>,
+  snap: (offsetY: number) => void
+) {
+  const vy = e.nativeEvent.velocity?.y;
+  if (vy != null && Math.abs(vy) > 0.28) return;
+  snap(e.nativeEvent.contentOffset.y);
+}
+
 function TimePickerModal({
   visible,
   title,
@@ -1450,6 +1494,7 @@ function TimePickerModal({
                 snapToInterval={TIME_PICKER_ROW_HEIGHT}
                 decelerationRate="normal"
                 bounces={false}
+                onScrollEndDrag={(e) => snapPickerAfterScrollDrag(e, snapHour)}
                 onMomentumScrollEnd={(e) => snapHour(e.nativeEvent.contentOffset.y)}
               >
                 {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((h) => (
@@ -1472,6 +1517,7 @@ function TimePickerModal({
                 snapToInterval={TIME_PICKER_ROW_HEIGHT}
                 decelerationRate="normal"
                 bounces={false}
+                onScrollEndDrag={(e) => snapPickerAfterScrollDrag(e, snapMinute)}
                 onMomentumScrollEnd={(e) => snapMinute(e.nativeEvent.contentOffset.y)}
               >
                 {minuteOptions.map((m) => (
@@ -1491,9 +1537,10 @@ function TimePickerModal({
                 style={[styles.timePickerCol, styles.timePickerColLast]}
                 contentContainerStyle={styles.timePickerColContent}
                 showsVerticalScrollIndicator={false}
-                snapToInterval={TIME_PICKER_ROW_HEIGHT}
+                snapToOffsets={[0, TIME_PICKER_ROW_HEIGHT]}
                 decelerationRate="normal"
                 bounces={false}
+                onScrollEndDrag={(e) => snapPickerAfterScrollDrag(e, snapAmPm)}
                 onMomentumScrollEnd={(e) => snapAmPm(e.nativeEvent.contentOffset.y)}
               >
                 {(["AM", "PM"] as const).map((v) => (
@@ -2140,15 +2187,6 @@ function ScheduleScreen({
           <ActivityIndicator color={PURPLE} style={{ marginTop: 4, marginBottom: 12 }} />
         ) : (
           <>
-            <View style={styles.card}>
-              <Text style={styles.cardName}>{currentDetailContact?.name ?? "Unknown contact"}</Text>
-              <Text style={styles.cardPhone}>
-                {currentDetailContact?.phone_e164
-                  ? formatPhoneDisplay(currentDetailContact.phone_e164)
-                  : "No phone number"}
-              </Text>
-            </View>
-
             <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Scheduled Calls</Text>
             {detailSchedules.length === 0 && !showForm ? (
               <View style={styles.card}>
@@ -2219,6 +2257,15 @@ function ScheduleScreen({
                   })}
                 </Text>
               ) : null}
+            </View>
+
+            <View style={[styles.card, { marginTop: 12 }]}>
+              <Text style={styles.cardName}>{currentDetailContact?.name ?? "Unknown contact"}</Text>
+              <Text style={styles.cardPhone}>
+                {currentDetailContact?.phone_e164
+                  ? formatPhoneDisplay(currentDetailContact.phone_e164)
+                  : "No phone number"}
+              </Text>
             </View>
           </>
         )
@@ -2325,6 +2372,32 @@ function AvailabilitySetupScreen({
     setPickerVisible(false);
   }
 
+  function enableDaySlot(dow: number) {
+    setWindows((prev) =>
+      prev.map((day, i) =>
+        i === dow
+          ? normalizeDaySlots({
+            enabled: true,
+            slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots,
+          })
+          : day
+      )
+    );
+  }
+
+  function addDaySlot(dow: number) {
+    setWindows((prev) =>
+      prev.map((day, i) =>
+        i === dow
+          ? normalizeDaySlots({
+            enabled: true,
+            slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
+          })
+          : day
+      )
+    );
+  }
+
   async function save() {
     setSaving(true);
     try {
@@ -2346,10 +2419,10 @@ function AvailabilitySetupScreen({
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
       <StatusBar style="dark" />
-      <Text style={styles.greeting}>When are you free to call?</Text>
+      <Text style={styles.greeting}>When are you generally free to call?</Text>
       <Text style={styles.availHint}>
         We'll only send you nudges during these times. You can change this anytime in
-        Settings.
+        Settings. Later, you can set your availability for the current week based on your Google Calendar events.
       </Text>
 
       <View style={styles.card}>
@@ -2366,18 +2439,7 @@ function AvailabilitySetupScreen({
           <View key={dow} style={styles.dayRow}>
             <Pressable
               style={[styles.dayToggle, windows[dow].enabled && styles.dayToggleOn]}
-              onPress={() =>
-                setWindows((prev) =>
-                  prev.map((day, i) =>
-                    i === dow
-                      ? normalizeDaySlots({
-                        enabled: !day.enabled,
-                        slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots,
-                      })
-                      : day
-                  )
-                )
-              }
+              onPress={() => enableDaySlot(dow)}
             >
               <ButtonLabel style={[styles.dayToggleText, windows[dow].enabled && styles.dayToggleTextOn]}>
                 {label}
@@ -2421,24 +2483,15 @@ function AvailabilitySetupScreen({
                   </View>
                 ))}
                 <Pressable
-                  onPress={() =>
-                    setWindows((prev) =>
-                      prev.map((day, i) =>
-                        i === dow
-                          ? normalizeDaySlots({
-                            enabled: true,
-                            slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
-                          })
-                          : day
-                      )
-                    )
-                  }
+                  onPress={() => addDaySlot(dow)}
                 >
                   <Text style={[styles.notesMetaText, { marginTop: 2 }]}>+ Add more times</Text>
                 </Pressable>
               </View>
             ) : (
-              <Text style={styles.dayOff}>Off</Text>
+              <Pressable style={{ flex: 1 }} onPress={() => enableDaySlot(dow)}>
+                <Text style={styles.dayOff}>Off</Text>
+              </Pressable>
             )}
           </View>
         ))}
@@ -3232,7 +3285,9 @@ function SettingsScreen({
                     </Pressable>
                   </View>
                 ) : (
-                  <Text style={styles.dayOff}>Off</Text>
+                  <Pressable style={styles.dayOffPressable} onPress={() => toggleDay("general", dow)}>
+                    <Text style={styles.dayOff}>Off</Text>
+                  </Pressable>
                 )}
               </View>
             ))}
@@ -3612,6 +3667,11 @@ const styles = StyleSheet.create({
   timeFieldText: { fontSize: 16, color: "#222" },
   timeSep: { marginHorizontal: 8, color: "#aaa", fontSize: 14 },
   dayOff: { fontSize: 13, color: "#ccc", marginLeft: 4 },
+  dayOffPressable: {
+    flex: 1,
+    minHeight: 32,
+    justifyContent: "center",
+  },
   timePickerBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.35)",
