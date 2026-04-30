@@ -263,6 +263,10 @@ export default function App() {
   const [persistedTimezone, setPersistedTimezone] = useState("UTC");
   const userRef = useRef<User | null>(null);
   userRef.current = user;
+  const [incomingCall, setIncomingCall] = useState<{
+    name?: string;
+    phone: string;
+  } | null>(null);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
@@ -271,7 +275,7 @@ export default function App() {
           setUser(JSON.parse(raw));
           setScreen("app");
           return;
-        } catch {}
+        } catch { }
       }
       setScreen("login");
     });
@@ -282,12 +286,12 @@ export default function App() {
       .then((savedTz) => {
         if (savedTz) setPersistedTimezone(savedTz);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const updatePersistedTimezone = useCallback((next: string) => {
     setPersistedTimezone(next);
-    AsyncStorage.setItem(STORAGE_TIMEZONE_KEY, next).catch(() => {});
+    AsyncStorage.setItem(STORAGE_TIMEZONE_KEY, next).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -302,7 +306,7 @@ export default function App() {
         fetchWithTimeout(
           `${getApiBase()}/users/${u.id}/contacts/${data.contactId}/called`,
           { method: "POST" }
-        ).catch(() => {});
+        ).catch(() => { });
       }
       openDialer(data.contactPhone);
     });
@@ -348,7 +352,7 @@ export default function App() {
   }
 
   async function handleLogout() {
-    await disconnectGoogleCalendar().catch(() => {});
+    await disconnectGoogleCalendar().catch(() => { });
     await AsyncStorage.removeItem(STORAGE_KEY);
     setUser(null);
     setActiveTab("home");
@@ -400,12 +404,12 @@ export default function App() {
       <StatusBar style="dark" />
       {user ? (
         <View style={[styles.tabScreen, activeTab !== "home" && styles.tabScreenHidden]}>
-          <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
+          <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => { })} setIncomingCall={setIncomingCall} />
         </View>
       ) : null}
       {user ? (
         <View style={[styles.tabScreen, activeTab !== "schedule" && styles.tabScreenHidden]}>
-          <ScheduleScreen user={user} onSyncContacts={() => showContactSelect(() => {})} />
+          <ScheduleScreen user={user} onSyncContacts={() => showContactSelect(() => { })} />
         </View>
       ) : null}
       {user ? (
@@ -415,7 +419,7 @@ export default function App() {
             initialTimezone={persistedTimezone}
             onTimezoneChange={updatePersistedTimezone}
             onLogout={handleLogout}
-            onSyncContacts={() => showContactSelect(() => {})}
+            onSyncContacts={() => showContactSelect(() => { })}
           />
         </View>
       ) : null}
@@ -443,6 +447,47 @@ export default function App() {
             />
           </View>
         ) : null}
+      </Modal>
+      <Modal visible={!!incomingCall} animationType="slide">
+        <View style={styles.callContainer}>
+          <View style={styles.callTopSection}>
+            <Text style={styles.callLabel}>mobile</Text>
+            <Text style={styles.callName}>{incomingCall?.name || "Unknown"}</Text>
+            <Text style={styles.callSubtitle}>CallWizard • Remind to Call</Text>
+          </View>
+          <View style={styles.callAvatarWrap}>
+            <View style={styles.callAvatar}>
+              <Text style={styles.callAvatarText}>
+                {(incomingCall?.name || "?")[0].toUpperCase()}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.callBottomSection}>
+            <View style={styles.callMainRow}>
+              <View style={styles.callMainBtnWrap}>
+                <Pressable
+                  style={[styles.callMainBtn, { backgroundColor: "#ff3b30" }]}
+                  onPress={() => setIncomingCall(null)}
+                >
+                  <Text style={styles.callMainBtnIcon}>📵</Text>
+                </Pressable>
+                <Text style={styles.callMainLabel}>Decline</Text>
+              </View>
+              <View style={styles.callMainBtnWrap}>
+                <Pressable
+                  style={[styles.callMainBtn, { backgroundColor: "#34c759" }]}
+                  onPress={() => {
+                    if (incomingCall?.phone) openDialer(incomingCall.phone);
+                    setIncomingCall(null);
+                  }}
+                >
+                  <Text style={styles.callMainBtnIcon}>📞</Text>
+                </Pressable>
+                <Text style={styles.callMainLabel}>Accept</Text>
+              </View>
+            </View>
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -485,7 +530,7 @@ function ContactSelectScreen({
   async function loadPhoneContacts(showSpinner = false) {
     console.log("[CONTACT_SYNC] loadPhoneContacts:start", { showSpinner, permDenied, allContactsCount: allContacts.length });
     // #region agent log
-    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H2',location:'mobile/App.tsx:388',message:'loadPhoneContacts called',data:{showSpinner,permDenied,allContactsCount:allContacts.length},timestamp:Date.now()})}).catch(()=>{});
+    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7e727' }, body: JSON.stringify({ sessionId: 'd7e727', runId: 'pre-fix', hypothesisId: 'H2', location: 'mobile/App.tsx:388', message: 'loadPhoneContacts called', data: { showSpinner, permDenied, allContactsCount: allContacts.length }, timestamp: Date.now() }) }).catch(() => { });
     // #endregion
     if (showSpinner) setReloadingContacts(true);
     try {
@@ -497,7 +542,7 @@ function ContactSelectScreen({
         canAskAgain: (perm as { canAskAgain?: boolean }).canAskAgain ?? null,
       });
       // #region agent log
-      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H5',location:'mobile/App.tsx:391',message:'contacts permission status',data:{status,accessPrivileges:(perm as { accessPrivileges?: string }).accessPrivileges ?? null,canAskAgain:(perm as { canAskAgain?: boolean }).canAskAgain ?? null},timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7e727' }, body: JSON.stringify({ sessionId: 'd7e727', runId: 'pre-fix', hypothesisId: 'H5', location: 'mobile/App.tsx:391', message: 'contacts permission status', data: { status, accessPrivileges: (perm as { accessPrivileges?: string }).accessPrivileges ?? null, canAskAgain: (perm as { canAskAgain?: boolean }).canAskAgain ?? null }, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
       if (status !== "granted") {
         setPermDenied(true);
@@ -517,7 +562,7 @@ function ContactSelectScreen({
         .sort((a, b) => a.name.localeCompare(b.name));
       console.log("[CONTACT_SYNC] loadPhoneContacts:loaded", { rawCount: data.length, normalizedCount: normalized.length });
       // #region agent log
-      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H3',location:'mobile/App.tsx:400',message:'contacts loaded from phone',data:{normalizedCount:normalized.length,sample:normalized.slice(0,3).map((c)=>c.phoneE164)},timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7e727' }, body: JSON.stringify({ sessionId: 'd7e727', runId: 'pre-fix', hypothesisId: 'H3', location: 'mobile/App.tsx:400', message: 'contacts loaded from phone', data: { normalizedCount: normalized.length, sample: normalized.slice(0, 3).map((c) => c.phoneE164) }, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
       setAllContacts(normalized);
       setSearch("");
@@ -608,7 +653,7 @@ function ContactSelectScreen({
   async function syncSelected() {
     console.log("[CONTACT_SYNC] syncSelected:start", { selectedCount: selected.size, totalAdded });
     // #region agent log
-    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H4',location:'mobile/App.tsx:441',message:'syncSelected invoked',data:{selectedCount:selected.size,totalAdded},timestamp:Date.now()})}).catch(()=>{});
+    fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7e727' }, body: JSON.stringify({ sessionId: 'd7e727', runId: 'pre-fix', hypothesisId: 'H4', location: 'mobile/App.tsx:441', message: 'syncSelected invoked', data: { selectedCount: selected.size, totalAdded }, timestamp: Date.now() }) }).catch(() => { });
     // #endregion
     if (selected.size === 0) { Alert.alert("Select at least one contact."); return; }
     setSyncing(true);
@@ -627,7 +672,7 @@ function ContactSelectScreen({
       const addedNow = Number(result.added ?? 0);
       console.log("[CONTACT_SYNC] syncSelected:result", { addedNow, responseAdded: result.added });
       // #region agent log
-      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d7e727'},body:JSON.stringify({sessionId:'d7e727',runId:'pre-fix',hypothesisId:'H4',location:'mobile/App.tsx:456',message:'syncSelected result',data:{addedNow,responseAdded:result.added,totalAddedBefore:totalAdded},timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7278/ingest/cd11b05d-92d0-48e8-834f-815effa35922', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd7e727' }, body: JSON.stringify({ sessionId: 'd7e727', runId: 'pre-fix', hypothesisId: 'H4', location: 'mobile/App.tsx:456', message: 'syncSelected result', data: { addedNow, responseAdded: result.added, totalAddedBefore: totalAdded }, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
       setTotalAdded((prev) => prev + addedNow);
       setSelected(new Set());
@@ -1019,9 +1064,11 @@ function SignUpScreen({
 function HomeScreen({
   user,
   onSyncContacts,
+  setIncomingCall,
 }: {
   user: User;
   onSyncContacts: () => void;
+  setIncomingCall?: (call: { name?: string; phone: string } | null) => void;
 }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1029,14 +1076,14 @@ function HomeScreen({
   useEffect(() => {
     apiFetchContacts(user.id)
       .then(setContacts)
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, [user.id]);
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") {
-        apiFetchContacts(user.id).then(setContacts).catch(() => {});
+        apiFetchContacts(user.id).then(setContacts).catch(() => { });
       }
     });
     return () => sub.remove();
@@ -1053,7 +1100,7 @@ function HomeScreen({
       `${getApiBase()}/users/${user.id}/contacts/${contactId}/called`,
       { method: "POST" },
       30000
-    ).catch(() => {});
+    ).catch(() => { });
     openDialer(phone);
   }
 
@@ -1067,14 +1114,14 @@ function HomeScreen({
   const recommendedContact =
     contacts.length > 0
       ? contacts
-          .map((c) => {
-            const lastMs = c.last_nudged_at
-              ? new Date(c.last_nudged_at).getTime()
-              : 0;
-            const overdueRatio = (Date.now() - lastMs) / (c.frequency_days * 86_400_000);
-            return { contact: c, overdueRatio };
-          })
-          .sort((a, b) => b.overdueRatio - a.overdueRatio)[0].contact
+        .map((c) => {
+          const lastMs = c.last_nudged_at
+            ? new Date(c.last_nudged_at).getTime()
+            : 0;
+          const overdueRatio = (Date.now() - lastMs) / (c.frequency_days * 86_400_000);
+          return { contact: c, overdueRatio };
+        })
+        .sort((a, b) => b.overdueRatio - a.overdueRatio)[0].contact
       : null;
 
   return (
@@ -1109,6 +1156,12 @@ function HomeScreen({
       ) : (
         <EmptyCard message="No contacts added yet" />
       )}
+      <Pressable
+        style={[styles.outlineBtn, { marginTop: 20 }]}
+        onPress={() => setIncomingCall?.({ name: "Test Contact", phone: "+15551234567" })}
+      >
+        <ButtonLabel style={styles.outlineBtnText}>Test Fake Call</ButtonLabel>
+      </Pressable>
     </ScrollView>
   );
 }
@@ -1389,72 +1442,72 @@ function TimePickerModal({
           <View style={styles.timePickerWheel}>
             <View style={styles.timePickerSelectionBar} pointerEvents="none" />
             <View style={styles.timePickerColumns}>
-            <ScrollView
-              ref={hourRef}
-              style={styles.timePickerCol}
-              contentContainerStyle={styles.timePickerColContent}
-              showsVerticalScrollIndicator={false}
-              snapToInterval={TIME_PICKER_ROW_HEIGHT}
-              decelerationRate="normal"
-              bounces={false}
-              onMomentumScrollEnd={(e) => snapHour(e.nativeEvent.contentOffset.y)}
-            >
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((h) => (
-                <Pressable
-                  key={`h-${h}`}
-                  style={[styles.timePickerItem, hour === h && styles.timePickerItemActive]}
-                  onPress={() => onHourChange(h)}
-                >
-                  <Text style={[styles.timePickerItemText, hour === h && styles.timePickerItemTextActive]}>
-                    {h}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-            <ScrollView
-              ref={minuteRef}
-              style={styles.timePickerCol}
-              contentContainerStyle={styles.timePickerColContent}
-              showsVerticalScrollIndicator={false}
-              snapToInterval={TIME_PICKER_ROW_HEIGHT}
-              decelerationRate="normal"
-              bounces={false}
-              onMomentumScrollEnd={(e) => snapMinute(e.nativeEvent.contentOffset.y)}
-            >
-              {minuteOptions.map((m) => (
-                <Pressable
-                  key={`m-${m}`}
-                  style={[styles.timePickerItem, minute === m && styles.timePickerItemActive]}
-                  onPress={() => onMinuteChange(m)}
-                >
-                  <Text style={[styles.timePickerItemText, minute === m && styles.timePickerItemTextActive]}>
-                    {m}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-            <ScrollView
-              ref={ampmRef}
-              style={[styles.timePickerCol, styles.timePickerColLast]}
-              contentContainerStyle={styles.timePickerColContent}
-              showsVerticalScrollIndicator={false}
-              snapToInterval={TIME_PICKER_ROW_HEIGHT}
-              decelerationRate="normal"
-              bounces={false}
-              onMomentumScrollEnd={(e) => snapAmPm(e.nativeEvent.contentOffset.y)}
-            >
-              {(["AM", "PM"] as const).map((v) => (
-                <Pressable
-                  key={`a-${v}`}
-                  style={[styles.timePickerItem, ampm === v && styles.timePickerItemActive]}
-                  onPress={() => onAmPmChange(v)}
-                >
-                  <Text style={[styles.timePickerItemText, ampm === v && styles.timePickerItemTextActive]}>
-                    {v}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
+              <ScrollView
+                ref={hourRef}
+                style={styles.timePickerCol}
+                contentContainerStyle={styles.timePickerColContent}
+                showsVerticalScrollIndicator={false}
+                snapToInterval={TIME_PICKER_ROW_HEIGHT}
+                decelerationRate="normal"
+                bounces={false}
+                onMomentumScrollEnd={(e) => snapHour(e.nativeEvent.contentOffset.y)}
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((h) => (
+                  <Pressable
+                    key={`h-${h}`}
+                    style={[styles.timePickerItem, hour === h && styles.timePickerItemActive]}
+                    onPress={() => onHourChange(h)}
+                  >
+                    <Text style={[styles.timePickerItemText, hour === h && styles.timePickerItemTextActive]}>
+                      {h}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <ScrollView
+                ref={minuteRef}
+                style={styles.timePickerCol}
+                contentContainerStyle={styles.timePickerColContent}
+                showsVerticalScrollIndicator={false}
+                snapToInterval={TIME_PICKER_ROW_HEIGHT}
+                decelerationRate="normal"
+                bounces={false}
+                onMomentumScrollEnd={(e) => snapMinute(e.nativeEvent.contentOffset.y)}
+              >
+                {minuteOptions.map((m) => (
+                  <Pressable
+                    key={`m-${m}`}
+                    style={[styles.timePickerItem, minute === m && styles.timePickerItemActive]}
+                    onPress={() => onMinuteChange(m)}
+                  >
+                    <Text style={[styles.timePickerItemText, minute === m && styles.timePickerItemTextActive]}>
+                      {m}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <ScrollView
+                ref={ampmRef}
+                style={[styles.timePickerCol, styles.timePickerColLast]}
+                contentContainerStyle={styles.timePickerColContent}
+                showsVerticalScrollIndicator={false}
+                snapToInterval={TIME_PICKER_ROW_HEIGHT}
+                decelerationRate="normal"
+                bounces={false}
+                onMomentumScrollEnd={(e) => snapAmPm(e.nativeEvent.contentOffset.y)}
+              >
+                {(["AM", "PM"] as const).map((v) => (
+                  <Pressable
+                    key={`a-${v}`}
+                    style={[styles.timePickerItem, ampm === v && styles.timePickerItemActive]}
+                    onPress={() => onAmPmChange(v)}
+                  >
+                    <Text style={[styles.timePickerItemText, ampm === v && styles.timePickerItemTextActive]}>
+                      {v}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
             </View>
           </View>
           <View style={styles.timePickerActions}>
@@ -1551,7 +1604,7 @@ function ScheduleScreen({
     Promise.all([
       refreshSchedulesAndContacts(),
     ])
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, [user.id]);
 
@@ -1561,7 +1614,7 @@ function ScheduleScreen({
       .then((d: { timezone?: string }) => {
         if (d?.timezone) setPrefsTimezone(d.timezone);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [user.id]);
 
   useEffect(() => {
@@ -2043,19 +2096,19 @@ function ScheduleScreen({
       );
     }
     return (
-        <Pressable
-          style={[styles.primaryBtn, { marginTop: 16 }]}
-          onPress={() => {
-            if (activeContactId) {
-              startAddScheduleForContact(activeContactId);
-            } else {
-              setShowForm(true);
-              setEditingScheduleId(null);
-            }
-          }}
-        >
-          <ButtonLabel style={styles.primaryBtnText}>+ Add Scheduled Call</ButtonLabel>
-        </Pressable>
+      <Pressable
+        style={[styles.primaryBtn, { marginTop: 16 }]}
+        onPress={() => {
+          if (activeContactId) {
+            startAddScheduleForContact(activeContactId);
+          } else {
+            setShowForm(true);
+            setEditingScheduleId(null);
+          }
+        }}
+      >
+        <ButtonLabel style={styles.primaryBtnText}>+ Add Scheduled Call</ButtonLabel>
+      </Pressable>
     );
   }
 
@@ -2318,9 +2371,9 @@ function AvailabilitySetupScreen({
                   prev.map((day, i) =>
                     i === dow
                       ? normalizeDaySlots({
-                          enabled: !day.enabled,
-                          slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots,
-                        })
+                        enabled: !day.enabled,
+                        slots: day.slots.length ? day.slots : DEFAULT_DAY_SLOTS.slots,
+                      })
                       : day
                   )
                 )
@@ -2354,9 +2407,9 @@ function AvailabilitySetupScreen({
                             prev.map((day, i) =>
                               i === dow
                                 ? normalizeDaySlots({
-                                    enabled: day.enabled,
-                                    slots: day.slots.filter((_, idx) => idx !== slotIdx),
-                                  })
+                                  enabled: day.enabled,
+                                  slots: day.slots.filter((_, idx) => idx !== slotIdx),
+                                })
                                 : day
                             )
                           )
@@ -2373,9 +2426,9 @@ function AvailabilitySetupScreen({
                       prev.map((day, i) =>
                         i === dow
                           ? normalizeDaySlots({
-                              enabled: true,
-                              slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
-                            })
+                            enabled: true,
+                            slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
+                          })
                           : day
                       )
                     )
@@ -2566,7 +2619,7 @@ function SettingsScreen({
             timestamp: Date.now(),
             runId: "pre-fix",
           }),
-        }).catch(() => {});
+        }).catch(() => { });
         // #endregion
         return r.json();
       })
@@ -2613,7 +2666,7 @@ function SettingsScreen({
             timestamp: Date.now(),
             runId: "pre-fix",
           }),
-        }).catch(() => {});
+        }).catch(() => { });
         // #endregion
         const effectiveTimezone =
           data.timezone && (!initialTimezone || initialTimezone === "UTC")
@@ -2645,7 +2698,7 @@ function SettingsScreen({
             timestamp: Date.now(),
             runId: "pre-fix",
           }),
-        }).catch(() => {});
+        }).catch(() => { });
         // #endregion
       })
       .finally(() => setLoadingPrefs(false));
@@ -2676,7 +2729,7 @@ function SettingsScreen({
         timestamp: Date.now(),
         runId: "pre-fix",
       }),
-    }).catch(() => {});
+    }).catch(() => { });
     // #endregion
   }, [googleCalReady, googleAuth.connected, serverGoogleLinked]);
 
@@ -2736,9 +2789,9 @@ function SettingsScreen({
       prev.map((day, i) =>
         i === dow
           ? normalizeDaySlots({
-              enabled: true,
-              slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
-            })
+            enabled: true,
+            slots: [...day.slots, { start_time: "09:00", end_time: "17:00" }],
+          })
           : day
       )
     );
@@ -2789,18 +2842,18 @@ function SettingsScreen({
       const body =
         source === "general"
           ? {
-              timezone,
-              min_call_minutes: minCallMinutes,
-              general_call_times,
-              // Backward compatibility for older server expecting "availability"
-              availability: general_call_times,
-            }
+            timezone,
+            min_call_minutes: minCallMinutes,
+            general_call_times,
+            // Backward compatibility for older server expecting "availability"
+            availability: general_call_times,
+          }
           : {
-              timezone,
-              this_week_slots,
-              // Backward compatibility for older server expecting "availability"
-              availability: general_call_times,
-            };
+            timezone,
+            this_week_slots,
+            // Backward compatibility for older server expecting "availability"
+            availability: general_call_times,
+          };
 
       const res = await fetchWithTimeout(`${getApiBase()}/users/${user.id}/preferences`, {
         method: "PUT",
@@ -3018,7 +3071,7 @@ function SettingsScreen({
                       timestamp: Date.now(),
                       runId: "pre-fix",
                     }),
-                  }).catch(() => {});
+                  }).catch(() => { });
                   // #endregion
                   Alert.alert("Connect Google", "Connect your Google account first.");
                   return;
@@ -3043,7 +3096,7 @@ function SettingsScreen({
                       timestamp: Date.now(),
                       runId: "pre-fix",
                     }),
-                  }).catch(() => {});
+                  }).catch(() => { });
                   // #endregion
                   if (token) {
                     const next = await fetchThisWeekSlotsFromCalendar({
@@ -3060,7 +3113,7 @@ function SettingsScreen({
                     await fetchWithTimeout(`${getApiBase()}/users/${user.id}/this-week/refresh`, {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
-                    }).catch(() => {});
+                    }).catch(() => { });
                     return;
                   }
                   if (serverGoogleLinked) {
@@ -3106,7 +3159,7 @@ function SettingsScreen({
                       timestamp: Date.now(),
                       runId: "pre-fix",
                     }),
-                  }).catch(() => {});
+                  }).catch(() => { });
                   // #endregion
                   Alert.alert("Connect Google", "Connect your Google account first.");
                 } catch (e: unknown) {
@@ -3719,4 +3772,26 @@ const styles = StyleSheet.create({
   },
   manualAddToggleText: { color: PURPLE, fontWeight: "600", fontSize: 14 },
   manualAddForm: { padding: 14, paddingTop: 4 },
+
+  //Fake incoming call screen
+  callContainer: {
+    flex: 1,
+    backgroundColor: "#1c1c1e",
+    justifyContent: "space-between",
+    paddingTop: Platform.OS === "ios" ? 60 : 40,
+    paddingBottom: Platform.OS === "ios" ? 48 : 32,
+  },
+  callTopSection: { alignItems: "center", paddingTop: 20 },
+  callLabel: { fontSize: 15, color: "#ebebf5aa", marginBottom: 6 },
+  callName: { fontSize: 40, fontWeight: "300", color: "#fff", letterSpacing: 0.5, marginBottom: 6, textAlign: "center", paddingHorizontal: 20 },
+  callSubtitle: { fontSize: 15, color: "#ebebf5aa" },
+  callAvatarWrap: { alignItems: "center" },
+  callAvatar: { width: 112, height: 112, borderRadius: 56, backgroundColor: "#636366", alignItems: "center", justifyContent: "center" },
+  callAvatarText: { fontSize: 48, fontWeight: "300", color: "#fff" },
+  callBottomSection: { paddingHorizontal: 40 },
+  callMainRow: { flexDirection: "row", justifyContent: "space-around", alignItems: "center" },
+  callMainBtnWrap: { alignItems: "center", gap: 10 },
+  callMainBtn: { width: 80, height: 80, borderRadius: 40, alignItems: "center", justifyContent: "center" },
+  callMainBtnIcon: { fontSize: 32 },
+  callMainLabel: { color: "#fff", fontSize: 15 },
 });

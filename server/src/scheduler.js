@@ -113,7 +113,11 @@ export async function passFrequencyNudges() {
       {
         title: "CallWizard",
         body: `Tap to call ${contact.name}`,
-        data: { contactPhone: contact.phone_e164, contactId: String(contact.id) },
+        data: {
+          contactPhone: contact.phone_e164,
+          contactId: String(contact.id),
+          contactName: contact.name,
+        },
       },
       () => pool.query(`UPDATE contacts SET last_notified_at = now() WHERE id = $1`, [contact.id])
     );
@@ -129,7 +133,7 @@ export async function passScheduledCalls() {
     JOIN users u ON u.id = cs.user_id
     JOIN contacts c ON c.id = cs.contact_id
     WHERE
-              ABS((EXTRACT(HOUR FROM cs.scheduled_time) * 60 + EXTRACT(MINUTE FROM cs.scheduled_time)) - (EXTRACT(HOUR FROM now() AT TIME ZONE u.timezone) * 60 + EXTRACT(MINUTE FROM now() AT TIME ZONE u.timezone))) < 5
+              ABS((EXTRACT(HOUR FROM cs.scheduled_time) * 60 + EXTRACT(MINUTE FROM cs.scheduled_time)) - (EXTRACT(HOUR FROM now() AT TIME ZONE u.timezone) * 60 + EXTRACT(MINUTE FROM now() AT TIME ZONE u.timezone))) < 
       AND (
         (cs.recurrence IN ('weekly', 'biweekly')
           AND cs.day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE u.timezone)::int)
@@ -157,7 +161,11 @@ export async function passScheduledCalls() {
       {
         title: "Time for a call!",
         body: `Time to call ${row.contact_name}!`,
-        data: { contactPhone: row.contact_phone, contactId: String(row.contact_id) },
+        data: {
+          contactPhone: row.contact_phone,
+          contactId: String(row.contact_id),
+          contactName: row.contact_name,
+        },
       },
       () =>
         pool.query(`UPDATE contact_schedules SET last_sent_at = now() WHERE id = $1`, [row.id])
