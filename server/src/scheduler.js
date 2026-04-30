@@ -112,7 +112,7 @@ export async function passFrequencyNudges() {
       tokens,
       {
         title: "CallWizard",
-        body: `Tap to call ${contact.name}`,
+        body: `Incoming call from ${contact.name}`,
         data: {
           contactPhone: contact.phone_e164,
           contactId: String(contact.id),
@@ -161,7 +161,7 @@ export async function passScheduledCalls() {
       tokens,
       {
         title: "Time for a call!",
-        body: `Time to call ${row.contact_name}!`,
+        body: `Incoming call from ${row.contact_name}!`,
         data: {
           contactPhone: row.contact_phone,
           contactId: String(row.contact_id),
