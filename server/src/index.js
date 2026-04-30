@@ -617,13 +617,21 @@ app.listen(PORT, () => {
   console.log(`CallWizard API http://localhost:${PORT}`);
 });
 
-// Run scheduler every 5 minutes
+// Scheduled recurring calls must be checked every minute for minute-level times.
+cron.schedule("* * * * *", async () => {
+  try {
+    await passScheduledCalls();
+  } catch (e) {
+    console.error("scheduled calls cron:", e.message);
+  }
+});
+
+// Run heavier scheduler tasks every 5 minutes.
 cron.schedule("*/5 * * * *", async () => {
   console.log("scheduler: running");
   try {
     await refreshThisWeekAvailabilityForAllConnectedUsers();
     await passFrequencyNudges();
-    await passScheduledCalls();
     console.log("scheduler: done");
   } catch (e) {
     console.error("scheduler error:", e.message);

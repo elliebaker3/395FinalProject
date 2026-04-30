@@ -133,7 +133,8 @@ export async function passScheduledCalls() {
     JOIN users u ON u.id = cs.user_id
     JOIN contacts c ON c.id = cs.contact_id
     WHERE
-              ABS((EXTRACT(HOUR FROM cs.scheduled_time) * 60 + EXTRACT(MINUTE FROM cs.scheduled_time)) - (EXTRACT(HOUR FROM now() AT TIME ZONE u.timezone) * 60 + EXTRACT(MINUTE FROM now() AT TIME ZONE u.timezone))) < 
+      EXTRACT(HOUR FROM cs.scheduled_time) = EXTRACT(HOUR FROM now() AT TIME ZONE u.timezone)
+      AND EXTRACT(MINUTE FROM cs.scheduled_time) = EXTRACT(MINUTE FROM now() AT TIME ZONE u.timezone)
       AND (
         (cs.recurrence IN ('weekly', 'biweekly')
           AND cs.day_of_week = EXTRACT(DOW FROM now() AT TIME ZONE u.timezone)::int)
