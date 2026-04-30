@@ -2,14 +2,6 @@
 
 Behaviorally lighter catch-up calls: nudges and one-tap dialer flows (mobile + API), plus a simple web intake form.
 
-## Intake form (GitHub Pages)
-
-**Live site:** [https://marinamancoridis.github.io/395FinalProject/](https://marinamancoridis.github.io/395FinalProject/)
-
-The form posts to your deployed API. In the GitHub repo, set the Actions **repository variable** `API_BASE_URL` to your public API origin (no trailing slash), then re-run the **Deploy intake website** workflow or push to `main`.
-
-If the site 404s, enable **Settings → Pages → Build and deployment → Source: GitHub Actions** and confirm the latest **Deploy intake website** run in **Actions** succeeded.
-
 ## Deploy API + database (Render + Neon)
 
 Step-by-step for the whole team (accounts, Neon schema, Render web service, `API_BASE_URL`): **[docs/SETUP-RENDER-NEON.md](docs/SETUP-RENDER-NEON.md)**.
@@ -22,23 +14,54 @@ Step-by-step for the whole team (accounts, Neon schema, Render web service, `API
 | `server/` | Express API + Postgres (Neon) |
 | `mobile/` | Expo (React Native) app for push + `tel:` dialer |
 
-## Quick start (local)
+# Quick start (local)
 
-Use the **conda** environment **`395final`** for every shell where you run Node or npm (including Expo). Avoid relying on Homebrew’s `node`/`npm` for this repo—activate conda first so those binaries win on your `PATH`.
+Note! Use the **conda** environment **`395final`** for every shell where you run Node or npm (including Expo).
 
+## 1. Clone the repository
+
+Clone the GitHub repo to a local directory:
 ```bash
+git clone <YOUR_REPO_URL>
+cd 395FinalProject
+```
+## 2. Create Conda Environment
+```bash
+conda env create -f environment.yml
 conda activate 395final
-cd /path/to/395FinalProject   # repo root
+```
+
+Make sure you are in the project root directory
+```bash
+cd /path/to/395FinalProject   # make sure you're in repo root
 npm run install:all
 ```
 
-Confirm Node/npm resolve inside the env (paths should mention `395final` or `conda`, not only `/opt/homebrew`):
+Say yes to downloading everything. Confirm Node/npm resolve inside the env (paths should mention `395final` or `conda`) by running the following:
 
 ```bash
 which node npm
 node -v
 ```
+## 3. Update GoogleCloud permissions
+For GoogleCloud service to work, you MUST do the following:
+Copy the content of tab /mobile/.env in our Proposal Google Doc to a new file you create /mobile/.env
 
+## 4. Set Up Expo Go
+To set up the mobile testing via ExpoGo:
+```bash
+npm run mobile
+```
+This should launch the project build in the terminal. Type `-s` in the terminal to launch the ExpoGo interface
+Download the Expo Go app from the Apple App Store
+Make an account for Expo Go
+Make sure your device and computer running the code are on same wifi (allow all permissions)
+
+## 5. Moment of truth
+```bash 
+npm run mobile
+```
+------ Old stuff ------
 Then:
 
 - **API:** copy `server/.env.example` to `server/.env`, set `DATABASE_URL`, then `npm run db:init` and `npm run server`.
