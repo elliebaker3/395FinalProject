@@ -111,9 +111,10 @@ export async function passFrequencyNudges() {
     await sendAndLog(
       tokens,
       {
-        title: "CallWizard",
-        body: `Incoming call from ${contact.name}`,
+        title: contact.name,
+        body: "Incoming call...",
         data: {
+          type: "incoming_call",
           contactPhone: contact.phone_e164,
           contactId: String(contact.id),
           contactName: contact.name,
@@ -160,9 +161,10 @@ export async function passScheduledCalls() {
     await sendAndLog(
       tokens,
       {
-        title: "Time for a call!",
-        body: `Incoming call from ${row.contact_name}!`,
+        title: row.contact_name,
+        body: "Incoming call...",
         data: {
+          type: "incoming_call",
           contactPhone: row.contact_phone,
           contactId: String(row.contact_id),
           contactName: row.contact_name,
