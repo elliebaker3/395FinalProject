@@ -1,0 +1,127 @@
+================================================================================
+  CALLWIZARD — LOCAL SETUP GUIDE
+================================================================================
+
+PREREQUISITES
+-------------
+- Node.js v22  (use nvm: `nvm install 22 && nvm use 22`)
+- npm >= 10    (comes with Node 22)
+- Expo Go app installed on a physical iOS or Android device
+  → iOS:     https://apps.apple.com/app/expo-go/id982107779
+  → Android: https://play.google.com/store/apps/details?id=host.exp.exponent
+
+--------------------------------------------------------------------------------
+STEP 1 — CLONE THE REPO
+--------------------------------------------------------------------------------
+
+  git clone <repo-url>
+  cd 395FinalProject-1
+
+--------------------------------------------------------------------------------
+STEP 2 — SERVER SETUP
+--------------------------------------------------------------------------------
+
+  cd server
+  npm install
+
+  Create the environment file:
+
+    cp .env.example .env
+
+  Then open server/.env and fill in the values:
+
+    PORT=3001
+    DATABASE_URL=postgresql://neondb_owner:npg_I5ncC1Ksqlmi@ep-summer-band-amvww9ef-pooler.c-5.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+    GOOGLE_APPLICATION_CREDENTIALS=        ← leave blank unless using Firebase push
+    GOOGLE_TOKEN_ENCRYPTION_KEY=           ← required for Google Calendar OAuth token storage
+    GOOGLE_WEB_CLIENT_ID=                  ← required for Google Calendar integration
+    GOOGLE_CLIENT_SECRET=                  ← required for Google Calendar integration
+
+  Start the server:
+
+    npm run dev          ← development (auto-restarts on file changes)
+    npm start            ← production
+
+  The server runs at http://localhost:3001
+
+  Optional — run database migrations if setting up a fresh database:
+
+    npm run db:init
+    npm run db:migrate
+    npm run db:migrate:schedules
+    npm run db:migrate:contact-unique
+    npm run db:migrate:contact-notes
+    npm run db:migrate:last-notified
+    npm run db:migrate:weekly-availability
+
+--------------------------------------------------------------------------------
+STEP 3 — MOBILE SETUP
+--------------------------------------------------------------------------------
+
+  cd ../mobile
+  npm install
+
+  Create the environment file:
+
+    cp .env.example .env
+
+  Then open mobile/.env and fill in the values:
+
+    EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=      ← required for Google Calendar sign-in
+    EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=      ← required for Google Calendar on iOS native builds
+
+  Start the app:
+
+    npx expo start
+
+  Scan the QR code with:
+    → iOS:     Camera app
+    → Android: Expo Go app
+
+  NOTE: Push notifications only work on a physical device, NOT on a simulator.
+  If you switch networks, re-open the app so your push token is re-registered.
+
+--------------------------------------------------------------------------------
+MOBILE DEPENDENCIES (installed automatically via npm install)
+--------------------------------------------------------------------------------
+
+  @expo-google-fonts/limelight
+  @react-native-async-storage/async-storage
+  expo ~54.0.0
+  expo-asset
+  expo-auth-session        ← Google OAuth
+  expo-constants
+  expo-contacts
+  expo-crypto
+  expo-dev-client
+  expo-font
+  expo-linking
+  expo-notifications       ← push notifications
+  expo-secure-store
+  expo-status-bar
+  expo-web-browser
+  luxon                    ← date/time utilities
+  react 19.1.0
+  react-native 0.81.5
+
+--------------------------------------------------------------------------------
+SERVER DEPENDENCIES (installed automatically via npm install)
+--------------------------------------------------------------------------------
+
+  cors
+  dotenv
+  expo-server-sdk          ← sends push notifications to Expo
+  express
+  firebase-admin           ← optional FCM push (requires GOOGLE_APPLICATION_CREDENTIALS)
+  node-cron                ← runs scheduler every 5 minutes
+  pg                       ← PostgreSQL client (Neon hosted DB)
+
+--------------------------------------------------------------------------------
+QUICK REFERENCE — COMMON COMMANDS
+--------------------------------------------------------------------------------
+
+  Start server (dev):      cd server  && npm run dev
+  Start mobile:            cd mobile  && npx expo start
+  Run scheduler once:      cd server  && npm run scheduler
+
+================================================================================
