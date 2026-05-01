@@ -39,6 +39,7 @@ import * as Contacts from "expo-contacts";
 import { presentAccessPickerAsync } from "expo-contacts";
 import { useFonts } from "expo-font";
 import * as Notifications from "expo-notifications";
+import { useLastNotificationResponse } from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -285,6 +286,42 @@ export default function App() {
     phone: string;
   } | null>(null);
 
+  // Add this hook at the top of App() with your other hooks
+  const lastNotificationResponse = useLastNotificationResponse();
+
+  useEffect(() => {
+    if (!lastNotificationResponse) return;
+    const data = lastNotificationResponse.notification.request.content.data;
+    console.log("COLD LAUNCH DATA:", JSON.stringify(data));
+    if (data?.type === "incoming_call") {
+      setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+    }
+  }, [lastNotificationResponse]);
+
+  // Keep this but remove the getLastNotificationResponseAsync chunk at the top
+  useEffect(() => {
+    const tapSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      console.log("TAP SUB DATA:", JSON.stringify(data));
+      if (data?.type === "incoming_call") {
+        setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+      }
+    });
+
+    const receiveSub = Notifications.addNotificationReceivedListener((notification) => {
+      const data = notification.request.content.data;
+      console.log("FOREGROUND DATA:", JSON.stringify(data));
+      if (data?.type === "incoming_call") {
+        setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+      }
+    });
+
+    return () => {
+      tapSub.remove();
+      receiveSub.remove();
+    };
+  }, []);
+
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
       if (raw) {
@@ -311,24 +348,24 @@ export default function App() {
     AsyncStorage.setItem(STORAGE_TIMEZONE_KEY, next).catch(() => { });
   }, []);
 
-  useEffect(() => {
-    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data as {
-        contactPhone?: string;
-        contactId?: string;
-      };
-      if (!data?.contactPhone) return;
-      const u = userRef.current;
-      if (u && data.contactId) {
-        fetchWithTimeout(
-          `${getApiBase()}/users/${u.id}/contacts/${data.contactId}/called`,
-          { method: "POST" }
-        ).catch(() => { });
-      }
-      openDialer(data.contactPhone);
-    });
-    return () => sub.remove();
-  }, []);
+  // useEffect(() => {
+  //   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+  //     const data = response.notification.request.content.data as {
+  //       contactPhone?: string;
+  //       contactId?: string;
+  //     };
+  //     if (!data?.contactPhone) return;
+  //     const u = userRef.current;
+  //     if (u && data.contactId) {
+  //       fetchWithTimeout(
+  //         `${getApiBase()}/users/${u.id}/contacts/${data.contactId}/called`,
+  //         { method: "POST" }
+  //       ).catch(() => { });
+  //     }
+  //     openDialer(data.contactPhone);
+  //   });
+  //   return () => sub.remove();
+  // }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -1195,6 +1232,46 @@ function HomeScreen({
         onPress={() => setIncomingCall?.({ name: "Test Contact", phone: "+15551234567" })}
       >
         <ButtonLabel style={styles.outlineBtnText}>Test Fake Call</ButtonLabel>
+      </Pressable>
+
+      <Pressable
+        style={[styles.outlineBtn, { marginTop: 12 }]}
+        onPress={async () => {
+          try {
+            const { status } = await Notifications.getPermissionsAsync();
+            console.log("Permission status:", status);
+
+            if (status !== "granted") {
+              const { status: newStatus } = await Notifications.requestPermissionsAsync();
+              console.log("New permission status:", newStatus);
+              if (newStatus !== "granted") {
+                Alert.alert("Permission denied", "Please enable notifications in Settings");
+                return;
+              }
+            }
+
+            console.log("Scheduling notification...");
+            const id = await Notifications.scheduleNotificationAsync({
+              content: {
+                title: "Alex Johnson",
+                body: "Incoming call...",
+                data: {
+                  type: "incoming_call",
+                  contactName: "Alex Johnson",
+                  contactPhone: "+15551234567"
+                }
+              },
+              trigger: { seconds: 5, type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL }
+            });
+            console.log("Scheduled successfully, id:", id);
+            Alert.alert("Success!", "Background the app now. Notification in 5 seconds.");
+          } catch (e) {
+            console.log("Error:", e);
+            Alert.alert("Error", String(e));
+          }
+        }}
+      >
+        <ButtonLabel style={styles.outlineBtnText}>Test Local Notification</ButtonLabel>
       </Pressable>
     </ScrollView>
   );
