@@ -617,8 +617,8 @@ app.post("/users/:userId/nudge", async (req, res) => {
     const result = await sendNudge(
       { expoPushToken: row.expo_push_token, fcmToken: row.fcm_token },
       {
-        title: "Time for a call?",
-        body: `Tap to call ${c.name}`,
+        title: "(CallWizard)",
+        body: `Free? Click to Call ${c.name}...`,
         data: {
           contactPhone: c.phone_e164,
           contactId: String(c.id),

@@ -522,7 +522,7 @@ export default function App() {
           <View style={styles.callTopSection}>
             <Text style={styles.callLabel}>mobile</Text>
             <Text style={styles.callName}>{incomingCall?.name || "Unknown"}</Text>
-            <Text style={styles.callSubtitle}>CallWizard • Remind to Call</Text>
+            <Text style={styles.callSubtitle}>CallWizard • You both may be free now</Text>
           </View>
           <View style={styles.callAvatarWrap}>
             <View style={styles.callAvatar}>
@@ -1253,8 +1253,8 @@ function HomeScreen({
             console.log("Scheduling notification...");
             const id = await Notifications.scheduleNotificationAsync({
               content: {
-                title: "Alex Johnson",
-                body: "Incoming call...",
+                title: "(CallWizard)",
+                body: "Free? Click to Call Alex Johnson...",
                 data: {
                   type: "incoming_call",
                   contactName: "Alex Johnson",

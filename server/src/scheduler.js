@@ -111,8 +111,8 @@ export async function passFrequencyNudges() {
     await sendAndLog(
       tokens,
       {
-        title: contact.name,
-        body: "Incoming call...",
+        title: "(CallWizard)",
+        body: `Free? Click to Call ${contact.name}...`,
         data: {
           type: "incoming_call",
           contactPhone: contact.phone_e164,
@@ -161,8 +161,8 @@ export async function passScheduledCalls() {
     await sendAndLog(
       tokens,
       {
-        title: row.contact_name,
-        body: "Incoming call...",
+        title: "(CallWizard)",
+        body: `Free? Click to Call ${row.contact_name}...`,
         data: {
           type: "incoming_call",
           contactPhone: row.contact_phone,

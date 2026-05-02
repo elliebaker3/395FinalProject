@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.callwizard.app",
+      "bundleIdentifier": "com.marina.callwizard",
+      "entitlements": {
+        "aps-environment": null
+      },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
