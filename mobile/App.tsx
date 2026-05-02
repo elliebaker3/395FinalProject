@@ -191,6 +191,7 @@ function isCompletePhone(raw: string): boolean {
 
 const STORAGE_KEY = "callwizard_user";
 const STORAGE_TIMEZONE_KEY = "callwizard_timezone";
+const STORAGE_PENDING_LOCAL_IDS = "callwizard_pending_local_notif_ids";
 
 // ── API ────────────────────────────────────────────────────────────────────
 
@@ -233,39 +234,156 @@ async function apiFetchContacts(userId: string): Promise<Contact[]> {
   return res.json();
 }
 
-async function registerPushToken(userId: string) {
+async function cancelStoredPendingLocalNotifications() {
   try {
-    const { status: existing } = await Notifications.getPermissionsAsync();
-    const { status } =
-      existing === "granted"
-        ? { status: existing }
-        : await Notifications.requestPermissionsAsync();
-    if (status !== "granted") {
-      console.log("PUSH: permission denied");
-      return;
+    const raw = await AsyncStorage.getItem(STORAGE_PENDING_LOCAL_IDS);
+    if (raw) {
+      const ids = JSON.parse(raw) as string[];
+      for (const id of ids) {
+        await Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+      }
     }
-    console.log("PUSH: permission granted");
+  } catch {
+    /* ignore */
+  }
+  await AsyncStorage.removeItem(STORAGE_PENDING_LOCAL_IDS).catch(() => {});
+}
 
-    const projectId =
-      (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)
-        ?.eas?.projectId;
-    if (!projectId) {
-      console.log("PUSH: no projectId in app.json");
-      return;
+/** Loads server-computed reminder times and schedules local notifications (no remote push). */
+async function syncPendingLocalReminders(userId: string) {
+  let { status } = await Notifications.getPermissionsAsync();
+  if (status !== "granted") {
+    const req = await Notifications.requestPermissionsAsync();
+    status = req.status;
+  }
+  if (status !== "granted") {
+    if (__DEV__) console.warn("[LOCAL_NOTIF] permission not granted");
+    return;
+  }
+
+  const pendingUrl = `${getApiBase()}/users/${userId}/pending-local-reminders`;
+  const res = await fetchWithTimeout(pendingUrl);
+  if (!res.ok) {
+    if (__DEV__) {
+      const text = await res.text();
+      console.warn(
+        "[LOCAL_NOTIF] pending-local-reminders HTTP",
+        res.status,
+        text.slice(0, 280),
+        "\n→",
+        pendingUrl
+      );
     }
-    console.log("PUSH: projectId =", projectId);
+    return;
+  }
 
-    const { data: expoPushToken } = await Notifications.getExpoPushTokenAsync({ projectId });
-    console.log("PUSH: token =", expoPushToken);
+  const json = (await res.json()) as {
+    frequency: null | {
+      kind: string;
+      contactId: string;
+      contactName: string;
+      contactPhone: string;
+      fireAt: string;
+    };
+    scheduled: Array<{
+      kind: string;
+      scheduleId: string;
+      contactId: string;
+      contactName: string;
+      contactPhone: string;
+      fireAt: string;
+    }>;
+  };
 
-    const res = await fetchWithTimeout(`${getApiBase()}/users/${userId}/device-token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expoPushToken }),
+  await cancelStoredPendingLocalNotifications();
+
+  const newIds: string[] = [];
+
+  const scheduleOne = async (
+    row: {
+      kind: "frequency" | "scheduled";
+      contactId: string;
+      contactName: string;
+      contactPhone: string;
+      scheduleId?: string;
+    },
+    trigger: Notifications.NotificationTriggerInput
+  ) => {
+    const id = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "The Wizard suggests you call…",
+        body: row.contactName,
+        data: {
+          type: "incoming_call",
+          source: "local_reminder",
+          kind: row.kind,
+          contactId: String(row.contactId),
+          ...(row.scheduleId ? { scheduleId: String(row.scheduleId) } : {}),
+          contactName: row.contactName,
+          contactPhone: row.contactPhone,
+        },
+      },
+      trigger,
     });
-    console.log("PUSH: token saved, server status =", res.status);
-  } catch (e) {
-    console.log("PUSH: registration failed —", e instanceof Error ? e.message : e);
+    newIds.push(id);
+  };
+
+  const triggerFor = (fireAtIso: string): Notifications.NotificationTriggerInput => {
+    const d = new Date(fireAtIso);
+    const ms = d.getTime();
+    const now = Date.now();
+    if (ms <= now) {
+      return { seconds: 5, type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL };
+    }
+    const sec = Math.ceil((ms - now) / 1000);
+    if (sec <= 120) {
+      return { seconds: Math.max(1, sec), type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL };
+    }
+    return {
+      type: Notifications.SchedulableTriggerInputTypes.DATE,
+      date: d,
+    } as Notifications.NotificationTriggerInput;
+  };
+
+  if (json.frequency) {
+    const f = json.frequency;
+    await scheduleOne(
+      {
+        kind: "frequency",
+        contactId: f.contactId,
+        contactName: f.contactName,
+        contactPhone: f.contactPhone,
+      },
+      triggerFor(f.fireAt)
+    );
+  }
+
+  const MAX_SCHEDULED_LOCAL = 16;
+  for (const s of (json.scheduled ?? []).slice(0, MAX_SCHEDULED_LOCAL)) {
+    await scheduleOne(
+      {
+        kind: "scheduled",
+        scheduleId: s.scheduleId,
+        contactId: s.contactId,
+        contactName: s.contactName,
+        contactPhone: s.contactPhone,
+      },
+      triggerFor(s.fireAt)
+    );
+  }
+
+  if (newIds.length) {
+    await AsyncStorage.setItem(STORAGE_PENDING_LOCAL_IDS, JSON.stringify(newIds));
+  }
+
+  if (__DEV__) {
+    console.log("[LOCAL_NOTIF] sync", {
+      frequency: Boolean(json.frequency),
+      scheduledFromApi: (json.scheduled ?? []).length,
+      scheduledLocal: newIds.length,
+    });
+    const all = await Notifications.getAllScheduledNotificationsAsync();
+    console.log("[LOCAL_NOTIF] on device", all.length, "notifications");
   }
 }
 
@@ -276,6 +394,8 @@ export default function App() {
     Limelight_400Regular,
   });
   const [screen, setScreen] = useState<Screen>("loading");
+  const screenRef = useRef<Screen>("loading");
+  screenRef.current = screen;
   const [user, setUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [persistedTimezone, setPersistedTimezone] = useState("UTC");
@@ -289,30 +409,59 @@ export default function App() {
   // Add this hook at the top of App() with your other hooks
   const lastNotificationResponse = useLastNotificationResponse();
 
+  const ackLocalReminderIfNeeded = useCallback((data: Record<string, unknown> | undefined) => {
+    if (!data || data.type !== "incoming_call" || data.source !== "local_reminder") return;
+    const u = userRef.current;
+    if (!u || typeof data.contactId !== "string") return;
+    const kind = data.kind === "scheduled" ? "scheduled" : "frequency";
+    const body =
+      kind === "frequency"
+        ? { kind: "frequency" as const, contactId: data.contactId }
+        : { kind: "scheduled" as const, scheduleId: String(data.scheduleId ?? "") };
+    if (kind === "scheduled" && !body.scheduleId) return;
+    void fetchWithTimeout(`${getApiBase()}/users/${u.id}/pending-local-ack`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!lastNotificationResponse) return;
-    const data = lastNotificationResponse.notification.request.content.data;
+    const data = lastNotificationResponse.notification.request.content.data as Record<string, unknown>;
     console.log("COLD LAUNCH DATA:", JSON.stringify(data));
     if (data?.type === "incoming_call") {
-      setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+      ackLocalReminderIfNeeded(data);
+      setIncomingCall({
+        name: data.contactName as string | undefined,
+        phone: String(data.contactPhone ?? ""),
+      });
     }
-  }, [lastNotificationResponse]);
+  }, [lastNotificationResponse, ackLocalReminderIfNeeded]);
 
   // Keep this but remove the getLastNotificationResponseAsync chunk at the top
   useEffect(() => {
     const tapSub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
+      const data = response.notification.request.content.data as Record<string, unknown>;
       console.log("TAP SUB DATA:", JSON.stringify(data));
       if (data?.type === "incoming_call") {
-        setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+        ackLocalReminderIfNeeded(data);
+        setIncomingCall({
+          name: data.contactName as string | undefined,
+          phone: String(data.contactPhone ?? ""),
+        });
       }
     });
 
     const receiveSub = Notifications.addNotificationReceivedListener((notification) => {
-      const data = notification.request.content.data;
+      const data = notification.request.content.data as Record<string, unknown>;
       console.log("FOREGROUND DATA:", JSON.stringify(data));
       if (data?.type === "incoming_call") {
-        setIncomingCall({ name: data.contactName, phone: data.contactPhone });
+        ackLocalReminderIfNeeded(data);
+        setIncomingCall({
+          name: data.contactName as string | undefined,
+          phone: String(data.contactPhone ?? ""),
+        });
       }
     });
 
@@ -320,7 +469,7 @@ export default function App() {
       tapSub.remove();
       receiveSub.remove();
     };
-  }, []);
+  }, [ackLocalReminderIfNeeded]);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
@@ -368,10 +517,21 @@ export default function App() {
   // }, []);
 
   useEffect(() => {
-    if (!user) return;
-    console.log("USER ID:", user.id);
-    registerPushToken(user.id);
-  }, [user?.id]);
+    if (!user || screen !== "app") return;
+    void syncPendingLocalReminders(user.id).catch((e) =>
+      console.log("local reminders sync:", e instanceof Error ? e.message : e)
+    );
+  }, [user?.id, screen]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      const u = userRef.current;
+      if (!u || screenRef.current !== "app") return;
+      void syncPendingLocalReminders(u.id).catch(() => {});
+    });
+    return () => sub.remove();
+  }, []);
 
   async function handleLogin(_displayName: string, phoneE164: string) {
     try {
@@ -422,6 +582,7 @@ export default function App() {
 
   async function handleLogout() {
     await disconnectGoogleCalendar().catch(() => { });
+    await cancelStoredPendingLocalNotifications();
     await AsyncStorage.removeItem(STORAGE_KEY);
     setUser(null);
     setActiveTab("home");
@@ -473,7 +634,7 @@ export default function App() {
       <StatusBar style="dark" />
       {user ? (
         <View style={[styles.tabScreen, activeTab !== "home" && styles.tabScreenHidden]}>
-          <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => { })} setIncomingCall={setIncomingCall} />
+          <HomeScreen user={user} onSyncContacts={() => showContactSelect(() => { })} />
         </View>
       ) : null}
       {user ? (
@@ -522,7 +683,7 @@ export default function App() {
           <View style={styles.callTopSection}>
             <Text style={styles.callLabel}>mobile</Text>
             <Text style={styles.callName}>{incomingCall?.name || "Unknown"}</Text>
-            <Text style={styles.callSubtitle}>CallWizard • You both may be free now</Text>
+            <Text style={styles.callSubtitle}>The Wizard suggested this call</Text>
           </View>
           <View style={styles.callAvatarWrap}>
             <View style={styles.callAvatar}>
@@ -1132,15 +1293,7 @@ function SignUpScreen({
 
 // ── Home Screen ────────────────────────────────────────────────────────────
 
-function HomeScreen({
-  user,
-  onSyncContacts,
-  setIncomingCall,
-}: {
-  user: User;
-  onSyncContacts: () => void;
-  setIncomingCall?: (call: { name?: string; phone: string } | null) => void;
-}) {
+function HomeScreen({ user, onSyncContacts }: { user: User; onSyncContacts: () => void }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1227,52 +1380,6 @@ function HomeScreen({
       ) : (
         <EmptyCard message="No contacts added yet" />
       )}
-      <Pressable
-        style={[styles.outlineBtn, { marginTop: 20 }]}
-        onPress={() => setIncomingCall?.({ name: "Test Contact", phone: "+15551234567" })}
-      >
-        <ButtonLabel style={styles.outlineBtnText}>Test Fake Call</ButtonLabel>
-      </Pressable>
-
-      <Pressable
-        style={[styles.outlineBtn, { marginTop: 12 }]}
-        onPress={async () => {
-          try {
-            const { status } = await Notifications.getPermissionsAsync();
-            console.log("Permission status:", status);
-
-            if (status !== "granted") {
-              const { status: newStatus } = await Notifications.requestPermissionsAsync();
-              console.log("New permission status:", newStatus);
-              if (newStatus !== "granted") {
-                Alert.alert("Permission denied", "Please enable notifications in Settings");
-                return;
-              }
-            }
-
-            console.log("Scheduling notification...");
-            const id = await Notifications.scheduleNotificationAsync({
-              content: {
-                title: "(CallWizard)",
-                body: "Free? Click to Call Alex Johnson...",
-                data: {
-                  type: "incoming_call",
-                  contactName: "Alex Johnson",
-                  contactPhone: "+15551234567"
-                }
-              },
-              trigger: { seconds: 5, type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL }
-            });
-            console.log("Scheduled successfully, id:", id);
-            Alert.alert("Success!", "Background the app now. Notification in 5 seconds.");
-          } catch (e) {
-            console.log("Error:", e);
-            Alert.alert("Error", String(e));
-          }
-        }}
-      >
-        <ButtonLabel style={styles.outlineBtnText}>Test Local Notification</ButtonLabel>
-      </Pressable>
     </ScrollView>
   );
 }
@@ -1856,6 +1963,9 @@ function ScheduleScreen({
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
 
       await refreshSchedulesAndContacts();
+      void syncPendingLocalReminders(user.id).catch((e) => {
+        if (__DEV__) console.warn("[LOCAL_NOTIF] sync after save failed", e);
+      });
       if (activeContactId) {
         await loadContactDetail(activeContactId);
       }
@@ -1888,6 +1998,9 @@ function ScheduleScreen({
         method: "DELETE",
       });
       setSchedules((prev) => prev.filter((s) => s.id !== id));
+      void syncPendingLocalReminders(user.id).catch((e) => {
+        if (__DEV__) console.warn("[LOCAL_NOTIF] sync after delete failed", e);
+      });
       if (activeContactId) await loadContactDetail(activeContactId);
     } catch {
       Alert.alert("Error", "Could not delete schedule.");

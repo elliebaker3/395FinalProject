@@ -4,7 +4,11 @@ import express from "express";
 import cron from "node-cron";
 import { pool } from "./db.js";
 import { sendNudge } from "./push.js";
-import { passFrequencyNudges, passScheduledCalls } from "./scheduler.js";
+import {
+  getPendingLocalReminders,
+  passFrequencyNudges,
+  passScheduledCalls,
+} from "./scheduler.js";
 import {
   computeAndPersistThisWeekAvailability,
   refreshThisWeekAvailabilityForAllConnectedUsers,
@@ -188,6 +192,51 @@ app.post("/users/:userId/contacts", async (req, res) => {
       [userId, name, phoneE164, frequencyDays ?? 7]
     );
     res.status(201).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.get("/users/:userId/pending-local-reminders", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await getPendingLocalReminders(userId);
+    if (result.error === "user_not_found") {
+      return res.status(404).json({ error: "user_not_found" });
+    }
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.post("/users/:userId/pending-local-ack", async (req, res) => {
+  const { userId } = req.params;
+  const { kind, contactId, scheduleId } = req.body ?? {};
+  try {
+    if (kind === "frequency") {
+      if (!contactId) return res.status(400).json({ error: "contactId required" });
+      const r = await pool.query(
+        `UPDATE contacts SET last_notified_at = now()
+         WHERE id = $1 AND owner_user_id = $2 RETURNING id`,
+        [contactId, userId]
+      );
+      if (!r.rowCount) return res.status(404).json({ error: "contact_not_found" });
+      return res.json({ ok: true });
+    }
+    if (kind === "scheduled") {
+      if (!scheduleId) return res.status(400).json({ error: "scheduleId required" });
+      const r = await pool.query(
+        `UPDATE contact_schedules SET last_sent_at = now()
+         WHERE id = $1 AND user_id = $2 RETURNING id`,
+        [scheduleId, userId]
+      );
+      if (!r.rowCount) return res.status(404).json({ error: "schedule_not_found" });
+      return res.json({ ok: true });
+    }
+    return res.status(400).json({ error: "kind must be frequency or scheduled" });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "db_error" });
@@ -637,7 +686,7 @@ app.listen(PORT, () => {
   console.log(`CallWizard API http://localhost:${PORT}`);
 });
 
-// Scheduled recurring calls must be checked every minute for minute-level times.
+// passScheduledCalls / passFrequencyNudges are no-ops — reminders are local on device.
 cron.schedule("* * * * *", async () => {
   try {
     await passScheduledCalls();
@@ -646,7 +695,6 @@ cron.schedule("* * * * *", async () => {
   }
 });
 
-// Run heavier scheduler tasks every 5 minutes.
 cron.schedule("*/5 * * * *", async () => {
   console.log("scheduler: running");
   try {
