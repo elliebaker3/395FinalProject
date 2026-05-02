@@ -9,6 +9,9 @@
   "main": "expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
+    "start:clear": "expo start --clear",
+    "start:dev-client": "expo start --dev-client",
+    "start:dev-client:clear": "expo start --dev-client --clear",
     "android": "expo run:android",
     "ios": "expo run:ios"
   },

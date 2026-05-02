@@ -1376,13 +1376,6 @@ function to24hTime(hour12: number, minute: string, ampm: "AM" | "PM"): string {
   return `${String(hour24).padStart(2, "0")}:${minute}`;
 }
 
-function roundMinuteToFive(minute: string): string {
-  const n = Number(minute);
-  if (Number.isNaN(n)) return "00";
-  const rounded = Math.round(n / 5) * 5;
-  return String(Math.min(55, Math.max(0, rounded))).padStart(2, "0");
-}
-
 const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "Pacific/Honolulu", label: "Honolulu (HST) - Pacific/Honolulu" },
   { value: "America/Anchorage", label: "Anchorage (AKST) - America/Anchorage" },
@@ -1514,7 +1507,7 @@ function TimePickerModal({
   const hourRef = useRef<ScrollView | null>(null);
   const minuteRef = useRef<ScrollView | null>(null);
   const ampmRef = useRef<ScrollView | null>(null);
-  const minuteOptions = Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, "0"));
+  const minuteOptions = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
 
   function clampIndex(index: number, max: number): number {
     return Math.max(0, Math.min(max, index));
@@ -1879,7 +1872,7 @@ function ScheduleScreen({
   function openScheduleTimePicker() {
     const parsed = parseTime12h(schedTime);
     setPickerHour(parsed.hour);
-    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerMinute(parsed.minute);
     setPickerAmPm(parsed.ampm);
     setPickerVisible(true);
   }
@@ -2437,7 +2430,7 @@ function AvailabilitySetupScreen({
     const parsed = parseTime12h(current);
     setPickerTarget({ dow, slotIdx, field });
     setPickerHour(parsed.hour);
-    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerMinute(parsed.minute);
     setPickerAmPm(parsed.ampm);
     setPickerVisible(true);
   }
@@ -2950,7 +2943,7 @@ function SettingsScreen({
     setPickerTarget({ dow, slotIdx, field });
     setPickerMode(mode);
     setPickerHour(parsed.hour);
-    setPickerMinute(roundMinuteToFive(parsed.minute));
+    setPickerMinute(parsed.minute);
     setPickerAmPm(parsed.ampm);
     setPickerVisible(true);
   }
